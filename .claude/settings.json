@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "BASH_DEFAULT_TIMEOUT_MS": "300000",
+    "BASH_MAX_TIMEOUT_MS": "600000",
+    "CLAUDE_AUTO_BACKGROUND_TASKS": "1",
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "72",
+    "MAX_MCP_OUTPUT_TOKENS": "50000"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(npm run build)",
+      "Bash(npm run check)",
+      "Bash(npm test)",
+      "Bash(npm run eval -- lint)",
+      "Bash(npm run eval -- static)",
+      "Bash(npm run eval -- affected *)"
+    ],
+    "ask": [
+      "Bash(npm run eval -- compare *)"
+    ],
+    "deny": [
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(secrets/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Edit(catalog.json)|Write(catalog.json)|Edit(plugin.json)|Write(plugin.json)|Edit(.claude-plugin/**)|Write(.claude-plugin/**)|Edit(hooks/hooks.json)|Write(hooks/hooks.json)|Edit(.copilot-plugin/**)|Write(.copilot-plugin/**)|Edit(.github/plugin/marketplace.json)|Write(.github/plugin/marketplace.json)|Edit(skills/*/README.md)|Write(skills/*/README.md)|Edit(agents/*/README.md)|Write(agents/*/README.md)|Edit(workflows/*/README.md)|Write(workflows/*/README.md)",
+            "command": "node ${CLAUDE_PROJECT_DIR}/.claude/hooks/block-generated.js",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CLAUDE_PROJECT_DIR}/.claude/hooks/remind-rebuild.js",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "node ${CLAUDE_PROJECT_DIR}/.claude/statusline.js"
+  },
+  "outputStyle": "Terse"
+}

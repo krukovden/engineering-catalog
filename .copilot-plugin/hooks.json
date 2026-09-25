@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "ROOT=\"${COPILOT_PLUGIN_ROOT:-$PWD}\"; cd \"${COPILOT_PROJECT_DIR:-$PWD}\" && sh \"$ROOT/skills/shared/catalog-freshness/scripts/check-freshness.sh\" --quiet --json",
+        "powershell": "$root = if ($env:COPILOT_PLUGIN_ROOT) { $env:COPILOT_PLUGIN_ROOT } else { $PWD.Path }; if ($env:COPILOT_PROJECT_DIR) { Set-Location $env:COPILOT_PROJECT_DIR }; & \"$root/skills/shared/catalog-freshness/scripts/check-freshness.ps1\" -Quiet -Json",
+        "timeoutSec": 30
+      }
+    ]
+  }
+}

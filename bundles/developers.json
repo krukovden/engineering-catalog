@@ -1,0 +1,23 @@
+{
+  "name": "developers",
+  "description": "Day-to-day code work with Azure DevOps and shared project memory.",
+  "skills": [
+    "grilling",
+    "writing-great-skills",
+    "unslop",
+    "diagnosing-bugs",
+    "pr-review",
+    "ado-credentials",
+    "ado-branch",
+    "ado-pull-request",
+    "commit",
+    "catalog-freshness",
+    "memory",
+    "memory-init"
+  ],
+  "agents": [
+    "memory-writer",
+    "code-reviewer"
+  ],
+  "workflows": []
+}

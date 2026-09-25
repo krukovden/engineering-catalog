@@ -1,0 +1,19 @@
+{
+  "$comment": "Cells, budgets and thresholds for `npm run eval`. Model ids are pinned in full: an alias would let a rollout look like a catalog regression. Copilot's list is what this organization's Copilot Business policy allows — Anthropic, Google, xAI and gpt-5.5/5.6 models are refused by the server.",
+  "cells": {
+    "trigger": [
+      { "target": "claude", "model": "claude-haiku-4-5", "effort": "medium" },
+      { "target": "copilot", "model": "gpt-5-mini", "effort": "medium" }
+    ],
+    "behaviour": [
+      { "target": "claude", "model": "claude-sonnet-5", "effort": "medium" },
+      { "target": "copilot", "model": "gpt-5.4", "effort": "medium" }
+    ]
+  },
+  "judge": { "target": "claude", "model": "claude-opus-5", "effort": "high" },
+  "runs": { "trigger": 2, "default": 3 },
+  "verdict": { "delta": 0.15, "minCases": 10, "maxInvalidShare": 0.1, "bootstrapResamples": 10000, "seed": 20260916 },
+  "guardrails": { "costRatio": 1.2, "durationRatio": 1.2 },
+  "budget": { "maxCostUsd": 5 },
+  "copilotCreditUsd": 0.01
+}

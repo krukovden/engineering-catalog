@@ -1,0 +1,6 @@
+{
+  "name": "developers",
+  "description": "Dev bundle",
+  "skills": ["alpha", "beta", "delta"],
+  "agents": ["helper"]
+}

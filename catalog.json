@@ -1,0 +1,298 @@
+{
+  "name": "engineering-catalog",
+  "description": "AI engineering catalog — skills, agents, workflows and bundles for GitHub Copilot and Claude Code",
+  "version": "1.0.4",
+  "source": "https://github.com/krukovden/engineering-catalog",
+  "skills": [
+    {
+      "name": "ado-credentials",
+      "description": "Preflight for Azure DevOps access — answers whether a credential is present, whether it still works against the organization, and exactly what to do if not. Run it first, then continue with the skill that needs Azure DevOps (for example qa-ado-work-item to file a bug); that skill starts only after this one answers ok. On Windows it checks the DPAPI-protected PAT written by its setup script; on macOS/Linux it checks the az CLI login and the azure-devops extension.",
+      "folder": "shared",
+      "invocation": "model",
+      "platforms": {},
+      "requires": [],
+      "path": "skills/shared/ado-credentials",
+      "version": "799b47279bb6"
+    },
+    {
+      "name": "catalog-freshness",
+      "description": "Once per session, before other work, check whether the installed engineering catalog is outdated — run the freshness script (it is cheap, needs only git, and stays silent when nothing is due) and relay its one-line hint to the user if it prints one. Applies to every project where the catalog is installed, on Claude Code and on GitHub Copilot alike.",
+      "folder": "shared",
+      "invocation": "model",
+      "platforms": {},
+      "requires": [],
+      "path": "skills/shared/catalog-freshness",
+      "version": "ed3906e3228a"
+    },
+    {
+      "name": "grilling",
+      "description": "Grill the user relentlessly about a plan, decision, or idea before any of it gets built — walk the decision tree one question at a time until there is shared understanding. Use when the user wants to stress-test their thinking, says \"grill me\", asks to sharpen or pressure-test a plan, or is about to start building something whose requirements are still fuzzy.",
+      "folder": "shared",
+      "invocation": "model",
+      "platforms": {},
+      "requires": [],
+      "path": "skills/shared/grilling",
+      "version": "1fa694c4a1e5"
+    },
+    {
+      "name": "memory",
+      "description": "Project memory for every session — read the project's memory/index.md before proposing anything, load a unit file when work touches it, and write an entry only when a change is hard to reverse, not obvious without context, and the result of a real trade-off. Use when starting work in a project that has a memory folder, when about to propose an approach, and after a decision that meets the three-part test.",
+      "folder": "shared",
+      "invocation": "model",
+      "platforms": {},
+      "requires": [],
+      "path": "skills/shared/memory",
+      "version": "8c4d814ed925"
+    },
+    {
+      "name": "memory-init",
+      "description": "Initialise project memory in this repository — choose the store, create the memory folder and index, point Claude and Copilot at it, install the post-commit hook, then fill the index from the code with honest evidence grades. Run once per project; safe to run again.",
+      "folder": "shared",
+      "invocation": "user",
+      "platforms": {},
+      "requires": [
+        "memory"
+      ],
+      "path": "skills/shared/memory-init",
+      "version": "662b016dd83a"
+    },
+    {
+      "name": "unslop",
+      "description": "Cut AI tells from any writing — scan for the listed patterns, rewrite with meaning and tone kept, self-audit. Use when the user says \"unslop this\", \"remove the AI tells\", \"make this sound less like AI\", or when another skill hands over a text it has drafted, such as a commit message or a PR description.",
+      "folder": "shared",
+      "invocation": "model",
+      "platforms": {},
+      "requires": [],
+      "path": "skills/shared/unslop",
+      "version": "48cdddc52bbb"
+    },
+    {
+      "name": "writing-great-skills",
+      "description": "Reference for authoring and pruning skills.",
+      "folder": "shared",
+      "invocation": "user",
+      "platforms": {},
+      "requires": [],
+      "path": "skills/shared/writing-great-skills",
+      "version": "fbd6e14629b6"
+    },
+    {
+      "name": "ado-branch",
+      "description": "Start a task on a correctly named branch — read the Azure DevOps work item and create feature/ADO-<id>-<title>, or bug/ADO-<id>-<title> for a Bug, from main. Use when the user says \"start task 12345\", \"create a branch for bug …\", \"branch for work item …\", or begins work on a work item without a branch.",
+      "folder": "developers",
+      "invocation": "model",
+      "platforms": {},
+      "requires": [
+        "ado-credentials"
+      ],
+      "path": "skills/developers/ado-branch",
+      "version": "d758b0be9ded"
+    },
+    {
+      "name": "ado-pull-request",
+      "description": "Finish a task with a pull request whose title and description feed the release notes — feat(<id>)/fix(<id>)/bug(<id>) lines written from the real diff, review offered, squash merge into main. Use when the user says \"prepare the PR\", \"create a pull request\", \"the code is done\", or is about to push a finished branch.",
+      "folder": "developers",
+      "invocation": "model",
+      "platforms": {},
+      "requires": [
+        "ado-credentials",
+        "pr-review",
+        "unslop"
+      ],
+      "path": "skills/developers/ado-pull-request",
+      "version": "c9a9bb2485f1"
+    },
+    {
+      "name": "commit",
+      "description": "Commit the current changes as one commit per change — split by hunk when a file carries parts of two — each with a message that follows this repository's own convention, read from its history, conventional commits when there is none, built from the diff, cleaned of AI tells, and created only after the user has reviewed which files go into which commit, read every message, and said yes. Use when the user says \"commit this\", \"commit my changes\", \"write a commit message\", or has finished a change and wants it recorded.",
+      "folder": "developers",
+      "invocation": "model",
+      "platforms": {},
+      "requires": [
+        "unslop"
+      ],
+      "path": "skills/developers/commit",
+      "version": "3dd8fb15383c"
+    },
+    {
+      "name": "diagnosing-bugs",
+      "description": "Diagnosis loop for hard bugs and performance regressions — refuses to theorise until a tight feedback loop already goes red on this bug. Use when the user says \"diagnose\" or \"debug this\", or reports something broken, throwing, failing, flaky, or slow.",
+      "folder": "developers",
+      "invocation": "model",
+      "platforms": {},
+      "requires": [],
+      "path": "skills/developers/diagnosing-bugs",
+      "version": "a07f099e1997"
+    },
+    {
+      "name": "pr-review",
+      "description": "Review a branch or pull request before it is opened or merged — collect the diff, launch the code-reviewer agent on a different model, and turn its findings into a short list to fix or accept. Use when the user says \"review my branch\", \"review this PR\", \"check this before I open a PR\", or is about to create a pull request.",
+      "folder": "developers",
+      "invocation": "model",
+      "platforms": {},
+      "requires": [],
+      "path": "skills/developers/pr-review",
+      "version": "16d55ad3ab01"
+    },
+    {
+      "name": "qa-ado-work-item",
+      "description": "Turn a tester's observation into a fact-checked Azure DevOps Bug, Task, Product Backlog Item or Feature — gather evidence from the repositories and the board first, then draft, then publish only what the user explicitly approved. Use when the user reports a defect or unexpected behaviour, asks to create or file a bug/task/PBI/feature in Azure DevOps, asks whether something is already on the board, or wants a QA observation checked against the code.",
+      "folder": "qa",
+      "invocation": "model",
+      "platforms": {},
+      "requires": [
+        "ado-credentials"
+      ],
+      "path": "skills/qa/qa-ado-work-item",
+      "version": "689928601339"
+    },
+    {
+      "name": "safety-ssh",
+      "description": "Safe, credential-free SSH to remote servers — the assistant works only through a named connection and never sees or types passwords, usernames, hostnames, or IPs. Use this skill to actually carry out any task that lives on another machine — a server, box, host, VM, instance, prod/staging environment, build or CI agent, database server, or jump/bastion host. If fulfilling the request means logging in over SSH and doing something there — restart or bounce a service, deploy, prune docker images, dump a schema, free up disk, tail or grep remote logs, run df/du/systemctl — this is the skill, and it is the required path for doing it. Treat these as triggers: \"ssh into…\", \"log into…\", \"connect to my server and…\", \"hop to the internal host and…\", a pasted `ssh user@host`, a bare IP, or an offered SSH password/key/.env secret. Not for local-only SSH: making keys, git publickey errors, explaining ssh flags or agent forwarding, passphrases, or local rsync.",
+      "folder": "ops",
+      "invocation": "model",
+      "platforms": {},
+      "requires": [],
+      "path": "skills/ops/safety-ssh",
+      "version": "7a1693d41270"
+    }
+  ],
+  "agents": [
+    {
+      "name": "memory-writer",
+      "description": "Drains the project's unrecorded-commit queue into memory entries, in isolation, so the working session spends no context on it. Use after a batch of commits, at the end of a task, or when reconcile.js reports commits memory has not caught up with.",
+      "folder": "shared",
+      "skills": [
+        "memory"
+      ],
+      "model": null,
+      "path": "agents/shared/memory-writer.md",
+      "version": "1c57d6b600b0"
+    },
+    {
+      "name": "code-reviewer",
+      "description": "Independent code review of a branch or pull request on a different model than the one that wrote the code — a rubber duck that reads the diff, verifies claims against the code, and returns findings with file:line and severity. Use before opening a pull request, when asked to review a branch or PR, or when a change feels too big to trust.",
+      "folder": "developers",
+      "skills": [
+        "pr-review"
+      ],
+      "model": {
+        "claude": "opus",
+        "copilot": "gemini-3.8-flash"
+      },
+      "path": "agents/developers/code-reviewer.md",
+      "version": "d27e608fd689"
+    },
+    {
+      "name": "qa-triage",
+      "description": "Triages a tester's observation before anything is filed — separates confirmed from reported from inferred, checks the board for duplicates, and decides whether it is a bug, a backlog item, or a question. Use when a tester describes unexpected behaviour and it is not yet clear what, if anything, should be filed.",
+      "folder": "qa",
+      "skills": [
+        "qa-ado-work-item",
+        "ado-credentials"
+      ],
+      "model": null,
+      "path": "agents/qa/qa-triage.md",
+      "version": "57082551f18d"
+    }
+  ],
+  "workflows": [
+    {
+      "name": "observation-to-work-item",
+      "description": "From a tester's observation to an approved Azure DevOps work item — preflight the credential, triage the observation, draft, get explicit approval, publish once and read it back.",
+      "folder": "qa",
+      "steps": [
+        {
+          "skill": "ado-credentials"
+        },
+        {
+          "agent": "qa-triage"
+        },
+        {
+          "skill": "qa-ado-work-item"
+        }
+      ],
+      "path": "workflows/qa/observation-to-work-item.md",
+      "version": "2e994abd1d20"
+    }
+  ],
+  "bundles": [
+    {
+      "name": "developers",
+      "audience": "developers",
+      "description": "Day-to-day code work with Azure DevOps and shared project memory.",
+      "skills": [
+        "grilling",
+        "writing-great-skills",
+        "unslop",
+        "diagnosing-bugs",
+        "pr-review",
+        "ado-credentials",
+        "ado-branch",
+        "ado-pull-request",
+        "commit",
+        "catalog-freshness",
+        "memory",
+        "memory-init"
+      ],
+      "agents": [
+        "memory-writer",
+        "code-reviewer"
+      ],
+      "workflows": []
+    },
+    {
+      "name": "ops",
+      "audience": "ops",
+      "description": "Machines and infrastructure, safely.",
+      "skills": [
+        "safety-ssh",
+        "catalog-freshness",
+        "memory",
+        "memory-init"
+      ],
+      "agents": [
+        "memory-writer"
+      ],
+      "workflows": []
+    },
+    {
+      "name": "product",
+      "audience": "product",
+      "description": "Sharpening plans and maintaining the catalog itself.",
+      "skills": [
+        "grilling",
+        "writing-great-skills",
+        "unslop",
+        "catalog-freshness",
+        "memory",
+        "memory-init"
+      ],
+      "agents": [
+        "memory-writer"
+      ],
+      "workflows": []
+    },
+    {
+      "name": "qa",
+      "audience": "qa",
+      "description": "Everything a tester needs to turn observations into fact-checked work items.",
+      "skills": [
+        "grilling",
+        "unslop",
+        "ado-credentials",
+        "qa-ado-work-item",
+        "catalog-freshness",
+        "memory",
+        "memory-init"
+      ],
+      "agents": [
+        "qa-triage",
+        "memory-writer"
+      ],
+      "workflows": [
+        "observation-to-work-item"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "name": "qa",
+  "description": "QA bundle",
+  "skills": ["alpha", "beta", "gamma"],
+  "agents": ["helper", "triager"],
+  "workflows": ["flow"]
+}

@@ -1,0 +1,20 @@
+{
+  "id": "SessionStart.check-freshness",
+  "scenarios": [
+    {
+      "name": "no receipt — silent and harmless",
+      "setup": { "fakeGitTags": [] },
+      "expect": { "exit": 0, "stdout": "empty", "maxMs": 10000, "maxOutputChars": 0 }
+    },
+    {
+      "name": "a newer release is announced even under --quiet",
+      "setup": { "receipt": { "catalogVersion": "1.0.0", "source": "https://example/repo" }, "fakeGitTags": ["v1.0.0", "v1.1.0"] },
+      "expect": { "exit": 0, "stdout": "1\\.0\\.0 → 1\\.1\\.0 available", "maxMs": 10000, "maxOutputChars": 300, "writes": [".engineering-catalog/freshness.json"] }
+    },
+    {
+      "name": "current version stays silent",
+      "setup": { "receipt": { "catalogVersion": "1.1.0", "source": "https://example/repo" }, "fakeGitTags": ["v1.1.0"] },
+      "expect": { "exit": 0, "stdout": "empty", "maxMs": 10000, "maxOutputChars": 0 }
+    }
+  ]
+}

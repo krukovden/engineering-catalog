@@ -1,0 +1,7 @@
+{
+  "name": "product",
+  "description": "Sharpening plans and maintaining the catalog itself.",
+  "skills": ["grilling", "writing-great-skills", "unslop", "catalog-freshness", "memory", "memory-init"],
+  "agents": ["memory-writer"],
+  "workflows": []
+}

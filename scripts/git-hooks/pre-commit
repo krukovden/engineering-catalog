@@ -1,0 +1,15 @@
+#!/bin/sh
+# Local mirror of what azure-pipelines.yml gates on, run before the round trip to CI.
+# Installed with: git config core.hooksPath scripts/git-hooks (see CONTRIBUTING.md).
+# Skip once with: git commit --no-verify. The pipeline remains the real enforcement.
+set -e
+
+# Git exports this during a commit; unset it so tests that create temporary worktrees
+# resolve the repository's real index instead of treating the relative path as foreign.
+unset GIT_INDEX_FILE
+
+echo "pre-commit: npm test"
+npm test
+
+echo "pre-commit: npm run check"
+npm run check

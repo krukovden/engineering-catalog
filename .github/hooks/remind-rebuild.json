@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "hooks": {
+    "postToolUse": [
+      {
+        "type": "command",
+        "command": "node .github/hooks/remind-rebuild.js",
+        "matcher": "create|edit|str_replace_editor|apply_patch",
+        "timeoutSec": 5
+      }
+    ]
+  }
+}

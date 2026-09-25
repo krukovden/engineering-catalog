@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "claudeVersion": "2.1.273",
+  "startedAt": "2026-09-16T18:30:27.950Z",
+  "durationSeconds": 16,
+  "costUsd": 0.04687510000000001,
+  "partial": false,
+  "suite": {
+    "root": "/repo/engineering-catalog",
+    "ablation": "none",
+    "modelOverride": "claude-haiku-4-5",
+    "judgeModel": "claude-opus-5",
+    "caseFilter": "trigger-ssh-staging-box-restart-api",
+    "threshold": 1,
+    "concurrency": 1,
+    "plugins": [
+      {
+        "name": "engineering-catalog",
+        "version": "1.0.1",
+        "path": "/repo/engineering-catalog"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "trigger-ssh-staging-box-restart-api",
+      "dir": "evals/safety-ssh/trigger-ssh-staging-box-restart-api",
+      "source": "prose",
+      "promptMarkdown": "i need to ssh into our staging box and restart the api, it's at 10.4.2.9, user is ubuntu",
+      "runsPerCase": 3,
+      "timeoutSeconds": 120,
+      "maxTurns": 3,
+      "graders": [
+        {
+          "name": "skill-fired",
+          "type": "tool_used",
+          "weight": 1,
+          "config": {
+            "tool": "Skill",
+            "input_match": "\"skill\"\\s*:\\s*\"(?:[\\w-]+:)?safety-ssh\"",
+            "min": 1,
+            "arm": "both"
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 4,
+            "costUsd": 0.04687510000000001,
+            "judgeCostUsd": 0,
+            "durationSeconds": 16,
+            "startedAt": "2026-09-16T18:30:27.987Z",
+            "error": "exit 1: Reached maximum number of turns (3)",
+            "tracePath": "/tmp/eval-out/trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "skill-fired",
+                "passed": true,
+                "weight": 1,
+                "explanation": "Skill called 2x (expected 1..∞)",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 1,
+        "passRate": 1
+      }
+    }
+  ],
+  "aggregates": {
+    "casesTotal": 1,
+    "casesPassed": 1,
+    "overallScore": 1,
+    "overallPassRate": 1
+  }
+}

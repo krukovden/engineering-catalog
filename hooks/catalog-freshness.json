@@ -1,0 +1,20 @@
+{
+  "name": "catalog-freshness",
+  "description": "Once a session, tell the user when the installed catalog is behind its newest release (§7.4). Silent when nothing is due; never fails a session.",
+  "event": "SessionStart",
+  "script": "skills/shared/catalog-freshness/scripts/check-freshness",
+  "args": {
+    "sh": [
+      "--quiet"
+    ],
+    "powershell": [
+      "-Quiet"
+    ]
+  },
+  "emitsContext": true,
+  "timeoutSec": 30,
+  "platforms": [
+    "claude",
+    "copilot"
+  ]
+}

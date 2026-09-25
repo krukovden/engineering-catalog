@@ -1,0 +1,33 @@
+{
+  "name": "engineering-catalog",
+  "version": "1.0.4",
+  "description": "AI engineering catalog — skills, agents, workflows and bundles for GitHub Copilot and Claude Code",
+  "author": {
+    "name": "krukovden",
+    "url": "https://github.com/krukovden"
+  },
+  "homepage": "https://github.com/krukovden/engineering-catalog",
+  "repository": "https://github.com/krukovden/engineering-catalog",
+  "keywords": [
+    "claude-code",
+    "github-copilot",
+    "agent-skills",
+    "plugin",
+    "marketplace"
+  ],
+  "bin": {
+    "engcat": "bin/engcat.js"
+  },
+  "scripts": {
+    "build": "node scripts/build.js",
+    "check": "node scripts/build.js --check",
+    "test": "node --test test/*.test.js",
+    "eval": "node scripts/eval.js",
+    "e2e:install": "node scripts/e2e/install-smoke.js"
+  },
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  }
+}

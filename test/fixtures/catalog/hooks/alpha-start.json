@@ -1,0 +1,9 @@
+{
+  "name": "alpha-start",
+  "description": "Fixture hook: runs a script at session start on both platforms.",
+  "event": "SessionStart",
+  "script": "scripts/fixture-hook",
+  "args": { "sh": ["--quiet"], "powershell": ["-Quiet"] },
+  "timeoutSec": 30,
+  "platforms": ["claude", "copilot"]
+}

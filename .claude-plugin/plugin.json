@@ -1,0 +1,32 @@
+{
+  "name": "engineering-catalog",
+  "displayName": "AI Engineering Catalog",
+  "description": "AI engineering catalog — skills, agents, workflows and bundles for GitHub Copilot and Claude Code",
+  "version": "1.0.4",
+  "author": {
+    "name": "krukovden",
+    "url": "https://github.com/krukovden"
+  },
+  "homepage": "https://github.com/krukovden/engineering-catalog",
+  "repository": "https://github.com/krukovden/engineering-catalog",
+  "license": "UNLICENSED",
+  "keywords": [
+    "claude-code",
+    "github-copilot",
+    "agent-skills",
+    "plugin",
+    "marketplace"
+  ],
+  "skills": [
+    "./skills/shared",
+    "./skills/developers",
+    "./skills/qa",
+    "./skills/ops"
+  ],
+  "agents": [
+    "./agents/shared/memory-writer.md",
+    "./agents/developers/code-reviewer.md",
+    "./agents/qa/qa-triage.md"
+  ],
+  "hooks": "./hooks/hooks.json"
+}

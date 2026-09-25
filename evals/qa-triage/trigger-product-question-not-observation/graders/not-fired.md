@@ -1,0 +1,8 @@
+---
+type: tool_used
+tool: Task
+input_match: '"subagent_type"\s*:\s*"(?:[\w-]+:)?qa-triage"'
+arm: both
+min: 0
+max: 0
+---

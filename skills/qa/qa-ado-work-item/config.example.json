@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "contexts": [
+    {
+      "name": "Acme-QA",
+      "workspaceRoot": "C:\\QA-Workspaces\\Acme-QA",
+      "repositories": [
+        {
+          "name": "Application",
+          "remoteUrl": "https://dev.azure.com/YOUR-ORG/YOUR-PROJECT/_git/Application",
+          "path": "C:\\QA-Workspaces\\Acme-QA\\Application"
+        }
+      ],
+      "systems": [
+        {
+          "name": "Staging",
+          "kind": "web",
+          "url": "https://staging.example.local",
+          "notes": "Record the build number shown in the footer with any evidence taken from here."
+        },
+        {
+          "name": "Device simulator",
+          "kind": "desktop",
+          "url": "https://simulator.example.local",
+          "notes": "A URL here is a pointer, never proof that the simulator was checked."
+        }
+      ],
+      "defaults": {
+        "workItemType": "Bug",
+        "parentId": null,
+        "areaPath": null,
+        "iterationPath": null
+      },
+      "allowedFields": [
+        "System.Title",
+        "System.Description",
+        "System.AreaPath",
+        "System.IterationPath",
+        "System.Tags",
+        "Microsoft.VSTS.TCM.ReproSteps",
+        "Microsoft.VSTS.TCM.SystemInfo",
+        "Microsoft.VSTS.Common.AcceptanceCriteria",
+        "Microsoft.VSTS.Common.Priority",
+        "Microsoft.VSTS.Common.Severity"
+      ]
+    }
+  ]
+}

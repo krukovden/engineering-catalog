@@ -1,0 +1,17 @@
+# Optional container isolation level for the eval harness.
+# Runs this harness's own commands (`claude plugin eval`, the Copilot runner) per-invocation via
+# scripts/eval/isolation.js's wrapCommand — there is no standalone scenario entrypoint here, so no
+# CMD/ENTRYPOINT bakes one in.
+# Build:  podman build -t engcat-eval:local -f evals/container/Containerfile .   (or docker)
+#
+# CLI versions are pinned to sane defaults, not synced to whatever the host has installed —
+# matching the host's exact version automatically is a documented open question, not solved here.
+FROM node:20-bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && npm install -g @anthropic-ai/claude-code >/dev/null 2>&1 || echo "claude CLI not installed (no network?)" \
+ && npm install -g @github/copilot >/dev/null 2>&1 || echo "copilot CLI not installed (no network?)"
+RUN useradd -m tester
+USER tester
+WORKDIR /home/tester
+ENV HOME=/home/tester

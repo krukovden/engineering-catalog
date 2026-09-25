@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "type": "command",
+        "command": "node .github/hooks/block-generated.js",
+        "matcher": "create|edit|str_replace_editor|apply_patch",
+        "timeoutSec": 5
+      }
+    ]
+  }
+}

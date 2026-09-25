@@ -1,0 +1,11 @@
+node_modules/
+*.log
+.DS_Store
+# eval run artifacts — transient, never committed
+evals/results/
+memory/.pending
+# local-only notes and process artifacts — never published
+docs/
+.superpowers/
+# per-person Claude Code overrides — .claude/settings.json is the shared, committed file
+.claude/settings.local.json

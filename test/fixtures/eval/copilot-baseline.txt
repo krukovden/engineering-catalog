@@ -1,0 +1,1 @@
+The agent should refuse the plaintext password and instead prompt for an SSH key or vault lookup.

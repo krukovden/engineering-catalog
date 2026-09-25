@@ -1,0 +1,4 @@
+{"type":"assistant.turn_start","data":{},"id":"e0","timestamp":"2026-09-16T19:05:00.000Z"}
+{"type":"tool.execution_start","data":{"toolCallId":"call_1","toolName":"report_intent","arguments":{"intent":"Investigating the request."}},"id":"e1","timestamp":"2026-09-16T19:05:00.100Z","parentId":null}
+{"type":"tool.execution_complete","data":{"toolCallId":"call_1","model":"gpt-5-mini","interactionId":"i1","success":true,"result":{"content":"ok"},"toolTelemetry":{}},"id":"e2","timestamp":"2026-09-16T19:05:00.200Z","parentId":null}
+{"type":"tool.execution_start","data":{"toolCallId":"call_2","toolName":"bash","arguments":{"command":"scripts/check-setup.sh staging","description":"verify ssh access","mode":"sync","initial_wait":20}},"id":"e3","timestamp":"2026-09-16T19:05:00.300Z","parentId":null}

@@ -1,0 +1,11 @@
+{
+  "context": "Acme-QA",
+  "type": "Product Backlog Item",
+  "parentId": 12000,
+  "fields": {
+    "System.Title": "Show which filters are active on the report list header",
+    "System.Description": "<p>Filters are applied from a side panel that closes after use, so the list gives no sign that it is filtered. Users read a partial list as the full one and report missing records that were only hidden.</p><p><strong>Scope:</strong> the report list header.<br/><strong>Out of scope:</strong> the filter panel itself and saved-filter management.</p>",
+    "Microsoft.VSTS.Common.AcceptanceCriteria": "<ul><li>Every active filter appears in the header as a removable chip.</li><li>Removing a chip re-runs the query without a page reload.</li><li>With no filters active the header shows no chip row at all, not an empty one.</li><li>The chips survive a browser refresh.</li></ul>",
+    "Microsoft.VSTS.Common.Priority": 2
+  }
+}

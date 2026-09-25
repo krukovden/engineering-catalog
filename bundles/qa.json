@@ -1,0 +1,7 @@
+{
+  "name": "qa",
+  "description": "Everything a tester needs to turn observations into fact-checked work items.",
+  "skills": ["grilling", "unslop", "ado-credentials", "qa-ado-work-item", "catalog-freshness", "memory", "memory-init"],
+  "agents": ["qa-triage", "memory-writer"],
+  "workflows": ["observation-to-work-item"]
+}

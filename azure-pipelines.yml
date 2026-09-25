@@ -1,0 +1,129 @@
+# Release versioning without ever pushing to main (DESIGN §6, AGENTS.md invariant 9).
+#
+# Two builds, one file:
+#
+#   PR build (pr: main)   — computes the version this PR will release, from the highest `v*`
+#                           tag on main: same major.minor → patch + 1; a new major.minor in
+#                           package.json → X.Y.0. Writes it into package.json, rebuilds every
+#                           manifest, tests, and — only when something changed — commits
+#                           `release: prepare vX.Y.Z` to the PR's SOURCE branch. The next PR
+#                           build finds nothing to change and passes; no loop.
+#   main build (trigger)  — after the merge: reads package.json, checks the artifacts are
+#                           current, and tags the merge commit `vX.Y.Z`. No commits to main.
+#
+# Branch policy on main this relies on: build validation required (this pipeline), and
+# "Build expiration: immediately when main is updated" — so two PRs prepared in parallel
+# cannot both land the same version (the second is rebuilt and gets the next number; if a
+# duplicate ever slips through, the main build fails on the existing tag instead of tagging
+# twice). The build service needs Contribute (to push to PR source branches) and Create tag.
+
+trigger:
+  branches:
+    include:
+      - main
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+jobs:
+  - job: prepare
+    displayName: PR — prepare the release version
+    condition: eq(variables['Build.Reason'], 'PullRequest')
+    steps:
+      - checkout: self
+        fetchDepth: 0
+        persistCredentials: true
+
+      - task: NodeTool@0
+        displayName: Use Node 20
+        inputs:
+          versionSpec: 20.x
+
+      # Dev-side Claude/Copilot config drift (.claude/skills/coding-agent-parity/SKILL.md) —
+      # a named step so it fails distinctly from the 300-odd assertions inside `npm test`.
+      - script: node .claude/skills/coding-agent-parity/scripts/check-parity.js
+        displayName: Coding agent parity check (Claude vs Copilot dev config)
+
+      - script: npm run eval -- lint
+        displayName: Eval lint (every case loads and is gradable, no model calls)
+
+      - script: npm run eval -- static
+        displayName: Eval static (per-target description cost, no model calls)
+
+      - script: npm run e2e:install
+        displayName: E2E install smoke (real engcat CLI in a container, no model calls)
+
+      - script: |
+          set -e
+          SRC="$(System.PullRequest.SourceBranch)"          # refs/heads/<branch>
+          git fetch origin --tags "+$SRC:refs/remotes/origin/pr-source"
+          git checkout -B prepare origin/pr-source
+          NEXT=$(node scripts/next-version.js)
+          echo "next version: $NEXT"
+          echo "##vso[build.updatebuildnumber]$NEXT"
+          CURRENT=$(node -p "require('./package.json').version")
+          if [ "$CURRENT" != "$NEXT" ]; then npm version "$NEXT" --no-git-tag-version; fi
+          npm run build
+          npm test
+          npm run check
+          if git diff --quiet; then
+            echo "package.json already at $NEXT and artifacts current — nothing to commit"
+            exit 0
+          fi
+          git config user.email "automated.pipeline@users.noreply.github.com"
+          git config user.name "Auto.Pipeline"
+          git add -A
+          git commit -m "release: prepare v$NEXT"
+          git push origin "HEAD:$SRC"
+          echo "pushed release commit to $SRC"
+        displayName: Compute version from main tags, rebuild, commit to the PR branch
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+  - job: tag
+    displayName: main — tag the release
+    condition: ne(variables['Build.Reason'], 'PullRequest')
+    steps:
+      - checkout: self
+        fetchDepth: 0
+        persistCredentials: true
+
+      - task: NodeTool@0
+        displayName: Use Node 20
+        inputs:
+          versionSpec: 20.x
+
+      - script: node .claude/skills/coding-agent-parity/scripts/check-parity.js
+        displayName: Coding agent parity check (Claude vs Copilot dev config)
+
+      - script: npm run eval -- lint
+        displayName: Eval lint (every case loads and is gradable, no model calls)
+
+      - script: npm run eval -- static
+        displayName: Eval static (per-target description cost, no model calls)
+
+      - script: |
+          set -e
+          git fetch origin --tags
+          VERSION=$(node -p "require('./package.json').version")
+          echo "##vso[build.updatebuildnumber]$VERSION"
+          npm test
+          npm run check
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            AT=$(git rev-list -n1 "v$VERSION")
+            if [ "$AT" = "$(git rev-parse HEAD)" ]; then echo "v$VERSION already tags this commit"; exit 0; fi
+            echo "##vso[task.logissue type=error]v$VERSION already exists at $AT — two PRs prepared the same version; rebase and re-run the PR build"
+            exit 1
+          fi
+          git config user.email "automated.pipeline@users.noreply.github.com"
+          git config user.name "Auto.Pipeline"
+          git tag -a "v$VERSION" -m "engineering-catalog $VERSION"
+          git push origin "v$VERSION"
+          echo "tagged v$VERSION"
+        displayName: Verify artifacts and tag v<version>
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)

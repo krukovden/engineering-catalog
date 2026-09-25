@@ -1,0 +1,161 @@
+{
+  "schemaVersion": 1,
+  "slug": "qa-triage-delegate-immediately-cycle2",
+  "date": "2026-09-16",
+  "hypothesis": "cycle 2, larger case set (n=10 vs n=4): an explicit delegate-immediately clause in qa-triage's description raises Task/subagent_type recall on the configured cheap trigger cell (claude-haiku-4-5, low effort) without raising false triggers",
+  "delta": 0.15,
+  "fingerprint": {
+    "baseSha": "f71c08f3f58d02cfb303066a35eefb3bc05045e4",
+    "candidateDirty": true,
+    "candidateSha": "f71c08f3f58d02cfb303066a35eefb3bc05045e4",
+    "cells": [
+      {
+        "target": "claude",
+        "model": "claude-haiku-4-5",
+        "effort": "low"
+      }
+    ],
+    "claudeVersion": null,
+    "createdAt": "2026-09-16T21:36:34.453Z",
+    "isolation": "native",
+    "judge": {
+      "target": "claude",
+      "model": "claude-opus-5",
+      "effort": "high"
+    },
+    "os": "darwin 24.6.0",
+    "partial": false,
+    "spentUsd": 4.7967,
+    "suiteHash": "991c48ae9b35"
+  },
+  "cells": [
+    {
+      "cellId": "claude:claude-haiku-4-5:low",
+      "cell": {
+        "target": "claude",
+        "model": "claude-haiku-4-5",
+        "effort": "low"
+      },
+      "verdict": "Not worse",
+      "reasons": [
+        "the lower bound 0.00 clears -δ (-0.15)"
+      ],
+      "guardrails": [
+        "cost ratio 1.30× exceeds guardrail 1.2×"
+      ],
+      "n": 10,
+      "meanBase": 0.5,
+      "meanCandidate": 0.5,
+      "meanDelta": 0,
+      "ci": {
+        "lower": 0,
+        "upper": 0,
+        "level": 0.95
+      },
+      "passK": {
+        "base": 0.5,
+        "candidate": 0.5,
+        "k": 5
+      },
+      "invalid": {
+        "base": 0,
+        "candidate": 0,
+        "total": 0,
+        "share": 0
+      },
+      "cost": {
+        "base": 0.03303185,
+        "candidate": 0.042856500000000006,
+        "ratio": 1.2974296020356113
+      },
+      "duration": {
+        "base": 18,
+        "candidate": 21,
+        "ratio": 1.1666666666666667
+      },
+      "hardRegression": false,
+      "triggers": {
+        "recall": {
+          "base": 0,
+          "candidate": 0
+        },
+        "falseTrigger": {
+          "base": 0,
+          "candidate": 0
+        }
+      },
+      "cases": [
+        {
+          "name": "trigger-already-triaged-just-file",
+          "base": 1,
+          "candidate": 1,
+          "delta": 0,
+          "regression": false
+        },
+        {
+          "name": "trigger-ambiguous-ui-glitch-possible-duplicate",
+          "base": 0,
+          "candidate": 0,
+          "delta": 0,
+          "regression": false
+        },
+        {
+          "name": "trigger-blank-screen-login",
+          "base": 0,
+          "candidate": 0,
+          "delta": 0,
+          "regression": false
+        },
+        {
+          "name": "trigger-confirmed-bug-with-repro",
+          "base": 1,
+          "candidate": 1,
+          "delta": 0,
+          "regression": false
+        },
+        {
+          "name": "trigger-dev-environment-setup-issue",
+          "base": 1,
+          "candidate": 1,
+          "delta": 0,
+          "regression": false
+        },
+        {
+          "name": "trigger-feature-request-not-observation",
+          "base": 1,
+          "candidate": 1,
+          "delta": 0,
+          "regression": false
+        },
+        {
+          "name": "trigger-flaky-behavior-worth-filing",
+          "base": 0,
+          "candidate": 0,
+          "delta": 0,
+          "regression": false
+        },
+        {
+          "name": "trigger-intermittent-crash-no-repro",
+          "base": 0,
+          "candidate": 0,
+          "delta": 0,
+          "regression": false
+        },
+        {
+          "name": "trigger-performance-complaint-since-release",
+          "base": 0,
+          "candidate": 0,
+          "delta": 0,
+          "regression": false
+        },
+        {
+          "name": "trigger-product-question-not-observation",
+          "base": 1,
+          "candidate": 1,
+          "delta": 0,
+          "regression": false
+        }
+      ]
+    }
+  ]
+}

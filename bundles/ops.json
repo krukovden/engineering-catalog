@@ -1,0 +1,7 @@
+{
+  "name": "ops",
+  "description": "Machines and infrastructure, safely.",
+  "skills": ["safety-ssh", "catalog-freshness", "memory", "memory-init"],
+  "agents": ["memory-writer"],
+  "workflows": []
+}

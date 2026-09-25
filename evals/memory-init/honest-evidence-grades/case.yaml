@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: honest-evidence-grades
+context:
+  scaffold_script: scaffold.sh
