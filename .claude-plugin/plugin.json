@@ -2,7 +2,7 @@
   "name": "engineering-catalog",
   "displayName": "AI Engineering Catalog",
   "description": "AI engineering catalog — skills, agents, workflows and bundles for GitHub Copilot and Claude Code",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "author": {
     "name": "krukovden",
     "url": "https://github.com/krukovden"
