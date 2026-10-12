@@ -119,3 +119,13 @@ test('an evals/ group must name a unit that ships', () => {
   assert.ok(r.errors.some((e) => e.includes('evals/wip names skill "wip"') && e.includes('does not ship')));
   assert.ok(!r.errors.some((e) => e.includes('evals/alpha') || e.includes('evals/scenarios')));
 });
+
+test('a skill description with an unquoted ": " is rejected (invalid YAML for the agents)', () => {
+  const fsx = require('fs'); const osx = require('os'); const px = require('path');
+  const dir = px.join(fsx.mkdtempSync(px.join(osx.tmpdir(), 'desc-')), 'colon');
+  fsx.mkdirSync(dir);
+  fsx.writeFileSync(px.join(dir, 'SKILL.md'), '---\nname: colon\ndescription: Use when asked: do it\n---\nbody\n');
+  const unit = require('../lib/units').loadSkillFromDir(dir, 'shared');
+  const { errors } = require('../lib/checks').checkCatalog({ units: [unit], bundles: [], evalGroups: [] });
+  assert.ok(errors.some((e) => /description holds ": " without quotes/.test(e)));
+});

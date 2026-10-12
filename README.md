@@ -175,13 +175,147 @@ what is missing.
 - Every commit (from any tool or person) is queued in `memory/.pending`; the assistant drains that
   queue before it reports a task done, so memory keeps up with the code by itself.
 
-## Azure DevOps, first time
+## For testers: Azure DevOps in Copilot
 
-Windows: `powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.copilot\skills\ado-credentials\scripts\setup.ps1"`
-(the PAT goes into its masked prompt, never into chat; scopes *Code Read* + *Work Items Read & write*),
-then `…\qa-ado-work-item\scripts\setup-workspace.ps1` for repositories. macOS/Linux: `az login`
-then `az extension add --name azure-devops`. Replace `.copilot` with `.claude` for a Claude-only install.
-Or just ask for the Azure DevOps task — the assistant detects the missing access and offers to set it up.
+Windows, Copilot CLI. You never run a setup script: you talk to Copilot, it runs the scripts
+and asks you to approve each command. macOS/Linux use `az login` and
+`az extension add --name azure-devops` instead.
+
+### Install and update
+
+Close Copilot first: Windows will not move a folder Copilot has open. Then, in PowerShell:
+
+```powershell
+# first install, and also the move from the old qa-ado-work-item-assistant
+npx -y git+https://github.com/krukovden/engineering-catalog install --bundle qa --target copilot
+
+# later: pick up a newer catalog
+npx -y git+https://github.com/krukovden/engineering-catalog update --global --target copilot
+
+# what is installed, and which version
+npx -y git+https://github.com/krukovden/engineering-catalog status --global
+```
+
+Coming from the old `qa-ado-work-item-assistant`: the same `install` moves the old skill out of
+Copilot's sight (to `~\.engineering-catalog\legacy\<date>\`) and carries your stored PAT
+and any old projects over. Nothing is deleted; the old settings folder is renamed
+`.qa-ado-assistant.migrated-<date>`.
+
+### First run
+
+Open Copilot. If no project is connected yet, it says so in its first answer. Then:
+
+```text
+You:     Add a project. Board: https://dev.azure.com/contoso/Contoso-App/_boards/board/t/Web%20Team/Backlog%20items
+         Code: https://dev.azure.com/contoso/Contoso-App/_git/web-app
+         Call it WEB.
+Copilot: Added WEB: Contoso-App / Web Team, area Contoso-App\Web Team,
+         repository web-app cloned to C:\Users\<you>\QA-Workspaces\WEB. WEB is current.
+```
+
+If you have no token stored (or it expired), Copilot opens Notepad with an empty file and a
+link to *User settings → Personal access tokens*. Create a token with **Code (Read)** and
+**Work Items (Read & write)**, paste it into Notepad, save, close Notepad, and type `done`.
+**Never paste a token into the chat.** If that happens, revoke it in Azure DevOps.
+
+### Everyday phrases
+
+| You say | What happens |
+|---|---|
+| "Which version of the engineering catalog is installed?" | the installed version and date, read from the install receipt |
+| "Which projects are connected?" | a list: alias, project / team, board, code, which one is current |
+| "Add a project" | Copilot asks for the board link, code links (optional), alias (optional) |
+| "I work in WEB now" | WEB becomes the current project; new bugs go there |
+| "Remove WEB" | forgets the project; cloned code stays on disk |
+| "File a bug: Export hangs for 30 s on an empty table" | evidence, duplicate search, a draft naming the project and area; nothing is filed until you say yes |
+| "My token expired" | the Notepad hand-over again; a token Azure DevOps rejects never replaces a working one |
+
+### Which link to give
+
+Any page of the project, copied from the browser address bar. Copilot reads the organization,
+project and team from it, and takes the team's area as the default for new bugs.
+
+| Link you have | Team taken from |
+|---|---|
+| `…/Contoso-App/_boards/board/t/Web%20Team/Backlog%20items` (board) | the link |
+| `…/Contoso-App/_backlogs/backlog/Web%20Team/Features` (backlog: items, features, epics) | the link |
+| `…/Contoso-App/_sprints/taskboard/Web%20Team/…/Sprint_16` (sprint, capacity) | the link |
+| `…/Contoso-App/_workitems/edit/104382` (a work item, e.g. a feature) | the team whose area holds that item |
+| `…/Contoso-App` or a query link | the project's default team |
+
+Code links: `…/Contoso-App/_git/<repo>` with or without `?path=…`, a pull request link, the
+clone URL (`https://contoso@dev.azure.com/…`) or the SSH remote all work.
+
+### Where the configuration lives
+
+You do not edit these files; Copilot writes them. They are shown so you know what "connected"
+means.
+
+`%USERPROFILE%\.ado-credentials\config.json` — your projects, and which one is current:
+
+```json
+{
+  "version": 1,
+  "activeContext": "WEB",
+  "contexts": [
+    {
+      "name": "WEB",
+      "organization": "https://dev.azure.com/contoso",
+      "project": "Contoso-App",
+      "team": "Web Team",
+      "areaPath": "Contoso-App\\Web Team",
+      "boardUrl": "https://dev.azure.com/contoso/Contoso-App/_boards/board/t/Web%20Team",
+      "repositories": [
+        { "name": "web-app", "project": "Contoso-App", "remoteUrl": "https://contoso@dev.azure.com/contoso/Contoso-App/_git/web-app" }
+      ]
+    }
+  ]
+}
+```
+
+`%USERPROFILE%\.qa-ado-work-item\config.json` — per project: where the code is cloned, the
+default area, environments to check (`systems`), and the fields a draft may set:
+
+```json
+{
+  "version": 1,
+  "contexts": [
+    {
+      "name": "WEB",
+      "workspaceRoot": "C:\\Users\\<you>\\QA-Workspaces\\WEB",
+      "repositories": [ { "name": "web-app", "remoteUrl": "https://contoso@dev.azure.com/contoso/Contoso-App/_git/web-app", "path": "C:\\Users\\<you>\\QA-Workspaces\\WEB\\web-app" } ],
+      "systems": [ { "name": "Staging", "kind": "web", "url": "https://staging.example.local" } ],
+      "defaults": { "workItemType": "Bug", "parentId": null, "areaPath": "Contoso-App\\Web Team", "iterationPath": null }
+    }
+  ]
+}
+```
+
+The token itself is `%USERPROFILE%\.ado-credentials\ado-pat.xml`, encrypted for your Windows
+account; it does not work if copied to another user or machine.
+
+### FAQ
+
+**I already had projects set up the old way.** They keep working. "Which projects are
+connected?" marks the ones without a board link: their bugs land in the project root, not on a
+team board. Give Copilot the board link for that project and it completes it in place.
+
+**Two teams in the same project?** Add each one with its own board link and alias, then switch
+with "I work in …". Adding a project never changes the current one, except the very first.
+
+**A project in another organization?** Add it the same way. The token must cover that
+organization too: create it with *All accessible organizations*, or keep one project per
+organization.
+
+**The bug did not show up on our board.** The project has no board link (see the first
+question), or the draft named another area. Every draft shows its project and area before you
+approve it.
+
+**The `npx` command printed nothing.** Run it again with `npx.cmd` instead of `npx`, and send a
+screenshot of the whole window if it is still silent.
+
+**Start over.** Close Copilot, delete `%USERPROFILE%\.ado-credentials` and
+`%USERPROFILE%\.qa-ado-work-item`, open Copilot, and add the project again.
 
 ## If something goes wrong
 
@@ -190,7 +324,7 @@ Or just ask for the Azure DevOps task — the assistant detects the missing acce
 | `npx: command not found` | install Node 20+ from nodejs.org |
 | `update` says a file was edited locally | `y` takes the catalog's version, `n` keeps yours |
 | "not installed here" | run `install` (global) or `install --local` in this project |
-| access check says `expired` | new PAT → rerun `setup.ps1` (Windows) or `az login` |
+| access check says `expired` | Windows: tell Copilot "my token expired"; macOS/Linux: `az login` |
 | memory fell behind the code (commits made by hand, by a colleague, or a session that never finished) | tell the assistant "catch memory up with `memory/.pending`" — it reads what was missed |
 
 Predecessor: [krukovden/skill-catalog](https://github.com/krukovden/skill-catalog).
@@ -205,8 +339,8 @@ Generated by `npm run build` — do not edit between the markers.
 
 | Name | Owner | Invocation | Description |
 |---|---|---|---|
-| [ado-credentials](skills/shared/ado-credentials/SKILL.md) | shared | model | Preflight for Azure DevOps access — answers whether a credential is present, whether it still works against the organization, and exactly what to do if not. Run it first, then continue with the skill that needs Azure DevOps (for example qa-ado-work-item to file a bug); that skill starts only after this one answers ok. On Windows it checks the DPAPI-protected PAT written by its setup script; on macOS/Linux it checks the az CLI login and the azure-devops extension. |
-| [catalog-freshness](skills/shared/catalog-freshness/SKILL.md) | shared | model | Once per session, before other work, check whether the installed engineering catalog is outdated — run the freshness script (it is cheap, needs only git, and stays silent when nothing is due) and relay its one-line hint to the user if it prints one. Applies to every project where the catalog is installed, on Claude Code and on GitHub Copilot alike. |
+| [ado-credentials](skills/shared/ado-credentials/SKILL.md) | shared | model | Preflight for Azure DevOps access — answers whether a credential is present, whether it still works against the organization, and exactly what to do if not. Run it first, then continue with the skill that needs Azure DevOps (for example qa-ado-work-item to file a bug); that skill starts only after this one answers ok. Also use when the user asks which Azure DevOps projects are connected, wants to add or remove a project (they give a board link and code links), says they now work in or want to switch to another project or team, or needs to enter or replace their PAT — on Windows all of it runs through this conversation, the user never runs a script. On macOS/Linux it checks the az CLI login and the azure-devops extension. |
+| [catalog-freshness](skills/shared/catalog-freshness/SKILL.md) | shared | model | Once per session, before other work, check whether the installed engineering catalog is outdated — run the freshness script (it is cheap, needs only git, and stays silent when nothing is due) and relay its one-line hint to the user if it prints one. Applies to every project where the catalog is installed, on Claude Code and on GitHub Copilot alike. Also use when the user asks which version of the engineering catalog is installed; then run the script with --version (-Version) and answer with the line it prints. |
 | [grilling](skills/shared/grilling/SKILL.md) | shared | model | Grill the user relentlessly about a plan, decision, or idea before any of it gets built — walk the decision tree one question at a time until there is shared understanding. Use when the user wants to stress-test their thinking, says "grill me", asks to sharpen or pressure-test a plan, or is about to start building something whose requirements are still fuzzy. |
 | [memory](skills/shared/memory/SKILL.md) | shared | model | Project memory for every session — read the project's memory/index.md before proposing anything, load a unit file when work touches it, and write an entry only when a change is hard to reverse, not obvious without context, and the result of a real trade-off. Use when starting work in a project that has a memory folder, when about to propose an approach, and after a decision that meets the three-part test. |
 | [memory-init](skills/shared/memory-init/SKILL.md) | shared | user | Initialise project memory in this repository — choose the store, create the memory folder and index, point Claude and Copilot at it, install the post-commit hook, then fill the index from the code with honest evidence grades. Run once per project; safe to run again. |

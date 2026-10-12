@@ -1,6 +1,7 @@
 ---
 name: catalog-freshness
-description: Once per session, before other work, check whether the installed engineering catalog is outdated — run the freshness script (it is cheap, needs only git, and stays silent when nothing is due) and relay its one-line hint to the user if it prints one. Applies to every project where the catalog is installed, on Claude Code and on GitHub Copilot alike.
+session-start: true
+description: Once per session, before other work, check whether the installed engineering catalog is outdated — run the freshness script (it is cheap, needs only git, and stays silent when nothing is due) and relay its one-line hint to the user if it prints one. Applies to every project where the catalog is installed, on Claude Code and on GitHub Copilot alike. Also use when the user asks which version of the engineering catalog is installed; then run the script with --version (-Version) and answer with the line it prints.
 ---
 
 ## What to do
@@ -20,9 +21,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<SKILL_DIR>/scripts/check-f
 
 - If the script prints a line, relay it to the user verbatim, then carry on with
   whatever the user actually asked for.
+- One line is not about freshness: *"No Azure DevOps project is connected yet…"*. It
+  appears every session on Windows while the QA skill is installed and no project is set
+  up. Relay it, and when the user sends a board link, add the project with the
+  `ado-credentials` skill.
 - If it prints nothing, say nothing about freshness and carry on — `--quiet`
   means the check was skipped (still inside the interval) or the catalog is
   already current.
+- When the user asks which catalog version is installed, run the script with `--version`
+  (PowerShell: `-Version`) instead of `--quiet` and answer with the line it prints. It reads
+  the install receipt only: no network, no seven-day interval.
 - Never run `update` yourself. The script only reports; updating is the user's
   decision.
 

@@ -34,7 +34,7 @@ they are where the same request starts producing different results run to run.
 
 | Script | Does |
 |--------|------|
-| `setup-workspace.ps1` | Clones the context's repositories and records systems/defaults. The user runs it once per context. |
+| `setup-workspace.ps1` | Clones a project's repositories and records its workspace and defaults. You run it with `-NoPrompt` right after a project is added. |
 | `sync-context.ps1` | `fetch --prune` + `pull --ff-only` across a context's repositories. Never resets, stashes, merges, rebases, or checks out. |
 | `query-ado.ps1` | Every read: `-Action Probe \| Types \| Fields \| Duplicates \| Show \| Children`. Read-only by construction. |
 | `publish-work-item.ps1` | The only write. Validates, previews, then creates once against an approved hash and reads the result back. |
@@ -50,29 +50,35 @@ codes carry meaning the text does not (see `references/troubleshooting.md`).
 
 ## Step 0: Preflight
 
-Run the `ado-credentials` preflight. Continue only on `ok`. On `absent` or `expired`,
-show its `steps` to the user verbatim and stop — the credential is theirs to create or
-replace, in a local window, never in chat.
+The user never runs a script and never opens PowerShell: you run everything, they answer
+in chat. Never read, print or decrypt anything under `%USERPROFILE%\.ado-credentials\`
+(`ado-pat.xml`, the paste file): the scripts use the PAT, you never see it. Run the `ado-credentials` preflight and follow it — it hands over the PAT and adds
+projects through the conversation when either is missing. Continue only on `ok`.
 
-Then confirm the workspace exists for the context: `query-ado.ps1 -Action Probe` exits 0
+Then confirm the current project has a workspace: `query-ado.ps1 -Action Probe` exits 0
 and returns the project and its work item types. If it reports that the context *has
-credentials but no workspace*, tell the user to run this themselves, in a local
-PowerShell window:
+credentials but no workspace* — and every time a project has just been added — set the
+workspace up yourself:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "<SKILL_DIR>/scripts/setup-workspace.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "<SKILL_DIR>/scripts/setup-workspace.ps1" -ContextName "<alias>" -NoPrompt
 ```
 
+It clones the project's code links into `%USERPROFILE%\QA-Workspaces\<alias>\` and makes
+the team's area path the default area. Exit 2 means the workspace is saved but a
+repository did not clone; tell the user which, and carry on.
+
 **Completion criterion:** the preflight returned `ok` and `query-ado.ps1 -Action Probe`
-exits 0 for the context.
+exits 0 for the project.
 
 ## Step 1: Pick the context and sync
 
-A context is one organization + project + set of repositories. The organization and
-project come from the credentials config; the repositories, systems and defaults from
-this skill's workspace config — joined by the context name. If the machine holds several
-contexts and the request does not identify one, **ask which** — guessing files work
-against the wrong project. Then:
+A context is one project the user works in, named by its alias: organization, project,
+team and board from the credentials config; repositories, systems and defaults from this
+skill's workspace config — joined by the alias. The user switches with "I work in X now"
+(`ado-credentials`: `projects.ps1 -Use X`). Use the **current** project unless the request
+names another; name the project in every draft, so a wrong one is caught before
+approval. If no project is current and several exist, ask which. Then:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "<SKILL_DIR>/scripts/sync-context.ps1" -ContextName "<name>"
@@ -142,11 +148,15 @@ disposition the user gave.
 ## Step 5: Draft
 
 Write board content in plain, concise English even when the conversation is in another
-language, and preserve the source details. Show this preview in chat:
+language, and preserve the source details. Set `System.AreaPath` to the project's default
+area (`defaults.areaPath`, the team the board link named) unless the user asked for
+another: without it the item lands in the project root and never shows on the team's
+board. Show this preview in chat:
 
 ```text
 Context: <name>
 Project: <organization> / <project>
+Area: <the project's default area, or the one the user asked for>
 Repository/component: <value or Unknown>
 Type: <Bug|Task|Product Backlog Item|Feature>
 Parent: <id and title, or None>

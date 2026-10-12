@@ -94,6 +94,13 @@ CLI has no user-invocation dialect; the flag hides a skill from the model *and* 
 `description` must say plainly it runs only when asked. Workflows always install as
 user-invoked skills.
 
+`session-start: true` (skills only) = run before the first answer of every session. Copilot
+adapter: also writes `<instructions dir>/<name>.instructions.md` (`~/.copilot/instructions/` or
+`.github/instructions/`) telling the model to run it and *begin the reply* with what it prints
+— a model-invoked "once per session" skill alone ran in only some sessions, and "relay" alone
+got the output dropped (`copilot-facts.md` §5). Claude: nothing extra (plugin `SessionStart`
+hook). `catalog-freshness` is the one such skill.
+
 `platforms:` carries per-target overrides, only value `skip` (`copilot: skip`, `claude:
 skip`). Frontmatter is one level deep: scalars, lists of scalars, lists of single-key maps
 (workflow `steps`) — no other shape parses.
@@ -333,6 +340,7 @@ lib/adapters/            claude.js, copilot.js
 lib/receipt.js           receipt read/write
 lib/install.js           bundle resolution, planInstall, applyInstall
 lib/update.js            diffUnits, detectLocalEdits, compareVersions
+lib/legacy.js            migration from the pre-catalog QA assistant: retired skills, old state folder
 lib/hooks.js             hook sources → both hook manifests
 scripts/build.js         npm run build / npm run check
 scripts/eval.js          npm run eval — lint, static, affected, compare

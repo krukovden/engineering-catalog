@@ -72,6 +72,14 @@ small file that records what was installed and lets `update` know what changed �
 `~/.engineering-catalog/receipt.json` (or `<project>/.engineering-catalog/receipt.json`
 for a local install).
 
+**Coming from the old `qa-ado-work-item-assistant`.** `install` and `update` clear it up
+before installing, for the tools you install for: the old skill folder is moved to
+`~/.engineering-catalog/legacy/<date>/` (out of the assistant's sight), and
+`%USERPROFILE%\.qa-ado-assistant\` — PAT, contexts, drafts — is carried into
+`.ado-credentials\` and `.qa-ado-work-item\`, then renamed `.qa-ado-assistant.migrated-<date>`.
+Nothing is deleted, and anything already in the new folders is kept over the old copy.
+Skills of your own in the same folder are never touched.
+
 **The marketplace alternative** (available once the catalog is on `main`). Both
 assistants can install the catalog as a plugin; the same files land on your machine,
 only the updater differs (`copilot plugin update` or Claude's plugin manager instead of
@@ -199,29 +207,25 @@ the evidence ledger, the duplicates found, and a recommended type and parent. It
 files anything.
 
 **First-time Azure DevOps setup.** Filing work items runs on **Windows** (Windows
-PowerShell 5.1 or newer, Git for Windows). Two scripts, run once, in your own PowerShell
-window — never in the chat:
+PowerShell 5.1 or newer, Git for Windows). There is nothing to run yourself: open Copilot
+and talk to it. It runs the scripts and asks you to approve each command.
 
-1. Credential. Create a Personal Access Token (PAT) in Azure DevOps under *User settings →
-   Personal access tokens* with scopes **Code (Read)** and **Work Items (Read & write)**,
-   then run:
+- *"Which projects are connected?"* — lists them: alias, project / team, board, code, and
+  which one is current.
+- *"Add a project"* — it asks for the **board link** (any board, backlog, sprint or work
+  item page of the project, copied from the browser), the **code links** (optional) and
+  an **alias** (optional). It reads the organization, project, team and the team's area
+  from the links, checks them against Azure DevOps, and clones the code.
+- *"I work in WEB now"* — switches the current project; new work items go there.
+- **The token.** When none is stored or it expired, Copilot opens Notepad with an empty
+  file and tells you where to create the token (*User settings → Personal access
+  tokens*, scopes **Code (Read)** and **Work Items (Read & write)**). Paste it there, save,
+  close Notepad, and say "done". It is stored encrypted for your Windows account and the
+  file is deleted. **Never paste a token into the chat**; if that happens, revoke it in
+  Azure DevOps and create a new one.
 
-   ```powershell
-   powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.copilot\skills\ado-credentials\scripts\setup.ps1"
-   ```
-
-   It asks for the PAT in a masked prompt, stores it encrypted for your Windows account
-   under `%USERPROFILE%\.ado-credentials\`, asks for the organization, project and a
-   short context name, and proves the token works. Never paste a PAT into chat; if that
-   happens, revoke it in Azure DevOps and create a new one.
-2. Repositories. Run:
-
-   ```powershell
-   powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.copilot\skills\qa-ado-work-item\scripts\setup-workspace.ps1"
-   ```
-
-   It clones the repositories the triage reads as evidence and records the defaults for
-   that context.
+The scripts behind this (`projects.ps1`, `pat.ps1`, `setup.ps1`, `setup-workspace.ps1`)
+stay available for setting a machine up by hand.
 
 For a Claude-only install use `$HOME\.claude\skills\…` in both paths. On macOS/Linux the
 access check works through `az login`, `az extension add --name azure-devops` and

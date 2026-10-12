@@ -165,6 +165,14 @@ Copilot CLI reads and **merges** all of these, with **no defined precedence orde
 - `GEMINI.md`
 - any directory named in `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`
 
+**Live, 2026-10-12** (copilot CLI in `evals/container`-style image, `-p` runs): a file at
+`$HOME/.copilot/instructions/<name>.instructions.md` (`applyTo: "**"` frontmatter) saying "at the
+start of every session run the `catalog-freshness` skill" made the model run it in 5/5 fresh
+sessions opened with a greeting; without the file it ran in some sessions only. Told only to
+"relay any line it prints", the model ran the script and dropped its one-line output (1/1);
+told to "begin your reply with that line, word for word", it led with the line (2/2). This is
+what `session-start: true` generates.
+
 Two consequences for this repository. First, Copilot CLI reads `AGENTS.md` (the contract) and
 `CLAUDE.md` (a one-line `@AGENTS.md` import) both natively, so the contract already reaches
 Copilot without being duplicated — `.github/copilot-instructions.md` only needs to carry what

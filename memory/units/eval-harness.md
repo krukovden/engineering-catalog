@@ -332,6 +332,8 @@ dangerous commands grant `[Skill, Read, Glob, Grep]` with no `Bash` at all.
 - sha-at-write: 65fab90baef6f4f5a9e32c4d3e0e9ea48c3370e8
 - merged-sha: none
 - supersedes: none
+- superseded-by: none
+- date: 2026-09-17
 
 `catalog-freshness` is the one hook the catalog ships, and §7.4's entire point is that it tells a
 person their catalog is stale. It printed a plain line. Claude Code adds a `SessionStart` hook's

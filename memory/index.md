@@ -2,7 +2,7 @@
      Machine-read fields: `reconciled-sha:` and `store:` lines. Keep it small; unit files win on conflict. -->
 # engineering-catalog — memory index
 
-reconciled-sha: 1fb451476fa11277fd91394b14c7c5d6b9e5fd4c
+reconciled-sha: 3e248b11839ae1bb047d50748ae23ab40477ab0f
 store: committed
 
 ## What this project is
@@ -25,10 +25,10 @@ ships as self-contained Node scripts inside the memory skills. No runtime depend
 | [[catalog-sources]] | the hand-written units, owner folders, bundles |
 | [[catalog-validation]] | frontmatter, loaders, invariant checks |
 | [[artifact-generation]] | build → catalog.json, plugin manifests and their listing metadata, READMEs |
-| [[distribution-cli]] | engcat install/update/status, receipts, PR/release-notes flow |
-| [[target-adapters]] | Claude and Copilot layouts, pure outputs, per-platform model hints |
+| [[distribution-cli]] | engcat install/update/status, receipts, legacy-assistant migration, PR/release-notes flow |
+| [[target-adapters]] | Claude and Copilot layouts, pure outputs, per-platform model hints, session-start instructions files |
 | [[project-memory]] | memory, memory-init, memory-writer |
-| [[azure-devops-access]] | ado-credentials preflight, qa-ado-work-item |
+| [[azure-devops-access]] | ado-credentials preflight and assistant-driven project/PAT setup, qa-ado-work-item |
 | [[eval-harness]] | eval cases and scaffolds, tiers, hook sources and contracts and what each host consumes, per-arm isolation, the two-worktree compare |
 
 ## Rejected at project level

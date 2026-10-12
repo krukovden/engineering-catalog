@@ -21,7 +21,8 @@ signal the same thing through the exit code. Read both.
 **"Azure DevOps rejected the PAT"** — expired, revoked, or missing a scope. Azure DevOps
 answers a bad PAT with its sign-in page (HTTP 203) or 401 rather than a JSON error, which
 is what this message detects. The PAT needs **Code (Read)** and **Work Items (Read &
-write)**. Re-run `scripts\setup.ps1`; it offers to keep or replace the stored PAT.
+write)**. Replace it with the hand-over: `scripts\pat.ps1 -Prepare`, then `-Import`; a new PAT
+that is not accepted is never kept over the old one.
 
 **"Protected PAT not found"** — the PAT is protected with DPAPI and only unwraps for the
 same Windows user on the same machine. A copied profile, a new machine, or a different
@@ -36,6 +37,11 @@ status — Windows PowerShell 5.1 negotiates TLS 1.0 by default and Azure DevOps
 1.2 or later. `common.ps1` enables TLS 1.2 on load; if the error persists, the machine's
 .NET Framework predates TLS 1.2 support or a proxy is terminating TLS. Update .NET
 Framework (4.7.2+) or open a ticket with whoever owns the proxy.
+
+**"Project 'X' not found"** from `setup.ps1` — the PAT works, but the name is not a
+project in that organization. Most often it is a team name (a team lives inside a
+project). The message lists the projects the PAT can see; re-run with the project URL
+copied from the browser.
 
 **"Access is denied" on `%USERPROFILE%\.ado-credentials`** — `setup.ps1` strips
 inherited permissions from the state folder with `icacls` and grants only the current
