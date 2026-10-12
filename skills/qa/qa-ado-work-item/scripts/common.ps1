@@ -240,6 +240,13 @@ function Invoke-AdoRest {
   if ($result -is [string] -and $result -match "Azure DevOps Services \| Sign In") {
     throw "Azure DevOps rejected the PAT (expired, revoked, or missing a scope). Run the ado-credentials preflight and follow its steps. [$Method $uri]"
   }
+  # Invoke-RestMethod also hands back raw text when the JSON holds a property name it cannot
+  # turn into a PowerShell property. Work item types do: a process's state transitions carry
+  # one keyed "" (the transition into the first state). Every caller reading .value would
+  # then see nothing, and the type check would reject every type. Rename that key and parse.
+  if ($result -is [string] -and $result.TrimStart().StartsWith("{")) {
+    $result = ($result -replace '(?<!\\)"":', '"(empty)":') | ConvertFrom-Json
+  }
   return $result
 }
 

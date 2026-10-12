@@ -48,3 +48,15 @@ On Copilot CLI `disable-model-invocation: true` hides a skill from the model and
 - date: 2026-09-15
 
 The `code-reviewer` agent carries a per-platform model hint (`claude: opus`, `copilot: gemini-3.8-flash`) so the local pre-PR review does not share the writer's model, and the pipeline review (`ai-pr-review`, Sonnet) adds a third. Same checklist for both, in `pr-review/references/checklist.md`. Trade-off: a hinted model may be unavailable on a plan — Copilot then warns and falls back to `auto` (observed), so the hint is a preference, never a requirement.
+
+### e-20261012-10e0 `session-start: true` makes Copilot run a skill through an instructions file
+- status: active
+- evidence: confirmed
+- pr: 17310
+- sha-at-write: 3e248b11839ae1bb047d50748ae23ab40477ab0f
+- merged-sha: none
+- supersedes: none
+- superseded-by: none
+- date: 2026-10-12
+
+A model-invoked skill whose description says "once per session" (`catalog-freshness`) ran in only some Copilot sessions — a greeting is not a reason for the model to fire it. A skill flagged `session-start: true` now also installs `<instructions dir>/<name>.instructions.md` (`~/.copilot/instructions/` or `.github/instructions/`, `applyTo: "**"`), which Copilot reads into every session. The wording is load-bearing: verified live, an instruction to "relay" the script's line made the model run it and drop the output, while "begin your reply with that line, word for word" led with it (`copilot-facts.md` §5). Claude needs nothing extra — its plugin `SessionStart` hook already covers it. The alternative, sharpening the skill description alone, was the state that failed; the cost is one always-loaded instruction per flagged skill, so the flag stays rare.

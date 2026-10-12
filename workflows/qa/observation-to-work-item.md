@@ -12,9 +12,10 @@ steps:
 ## Step 1 — `ado-credentials`
 
 Preflight the Azure DevOps credential before anything else runs. Continue only on
-`ok`. On `absent` or `expired`, show the `steps` it returns verbatim and stop the
-chain here — the credential is the tester's to create or replace, never something
-this workflow works around.
+`ok`. On `absent` or `expired`, follow `ado-credentials`: on Windows it hands the PAT
+over through Notepad or adds the project from a board link, in this conversation;
+elsewhere it shows its `steps`. Do not work around a missing credential, and never
+read the PAT yourself.
 
 ## Step 2 — `qa-triage`
 

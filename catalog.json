@@ -6,23 +6,25 @@
   "skills": [
     {
       "name": "ado-credentials",
-      "description": "Preflight for Azure DevOps access — answers whether a credential is present, whether it still works against the organization, and exactly what to do if not. Run it first, then continue with the skill that needs Azure DevOps (for example qa-ado-work-item to file a bug); that skill starts only after this one answers ok. On Windows it checks the DPAPI-protected PAT written by its setup script; on macOS/Linux it checks the az CLI login and the azure-devops extension.",
+      "description": "Preflight for Azure DevOps access — answers whether a credential is present, whether it still works against the organization, and exactly what to do if not. Run it first, then continue with the skill that needs Azure DevOps (for example qa-ado-work-item to file a bug); that skill starts only after this one answers ok. Also use when the user asks which Azure DevOps projects are connected, wants to add or remove a project (they give a board link and code links), says they now work in or want to switch to another project or team, or needs to enter or replace their PAT — on Windows all of it runs through this conversation, the user never runs a script. On macOS/Linux it checks the az CLI login and the azure-devops extension.",
       "folder": "shared",
       "invocation": "model",
       "platforms": {},
       "requires": [],
+      "sessionStart": false,
       "path": "skills/shared/ado-credentials",
-      "version": "799b47279bb6"
+      "version": "e7e192a9dfc0"
     },
     {
       "name": "catalog-freshness",
-      "description": "Once per session, before other work, check whether the installed engineering catalog is outdated — run the freshness script (it is cheap, needs only git, and stays silent when nothing is due) and relay its one-line hint to the user if it prints one. Applies to every project where the catalog is installed, on Claude Code and on GitHub Copilot alike.",
+      "description": "Once per session, before other work, check whether the installed engineering catalog is outdated — run the freshness script (it is cheap, needs only git, and stays silent when nothing is due) and relay its one-line hint to the user if it prints one. Applies to every project where the catalog is installed, on Claude Code and on GitHub Copilot alike. Also use when the user asks which version of the engineering catalog is installed; then run the script with --version (-Version) and answer with the line it prints.",
       "folder": "shared",
       "invocation": "model",
       "platforms": {},
       "requires": [],
+      "sessionStart": true,
       "path": "skills/shared/catalog-freshness",
-      "version": "ed3906e3228a"
+      "version": "bcb5512699ac"
     },
     {
       "name": "grilling",
@@ -31,6 +33,7 @@
       "invocation": "model",
       "platforms": {},
       "requires": [],
+      "sessionStart": false,
       "path": "skills/shared/grilling",
       "version": "1fa694c4a1e5"
     },
@@ -41,6 +44,7 @@
       "invocation": "model",
       "platforms": {},
       "requires": [],
+      "sessionStart": false,
       "path": "skills/shared/memory",
       "version": "8c4d814ed925"
     },
@@ -53,6 +57,7 @@
       "requires": [
         "memory"
       ],
+      "sessionStart": false,
       "path": "skills/shared/memory-init",
       "version": "662b016dd83a"
     },
@@ -63,6 +68,7 @@
       "invocation": "model",
       "platforms": {},
       "requires": [],
+      "sessionStart": false,
       "path": "skills/shared/unslop",
       "version": "48cdddc52bbb"
     },
@@ -73,6 +79,7 @@
       "invocation": "user",
       "platforms": {},
       "requires": [],
+      "sessionStart": false,
       "path": "skills/shared/writing-great-skills",
       "version": "fbd6e14629b6"
     },
@@ -85,6 +92,7 @@
       "requires": [
         "ado-credentials"
       ],
+      "sessionStart": false,
       "path": "skills/developers/ado-branch",
       "version": "d758b0be9ded"
     },
@@ -99,6 +107,7 @@
         "pr-review",
         "unslop"
       ],
+      "sessionStart": false,
       "path": "skills/developers/ado-pull-request",
       "version": "c9a9bb2485f1"
     },
@@ -111,6 +120,7 @@
       "requires": [
         "unslop"
       ],
+      "sessionStart": false,
       "path": "skills/developers/commit",
       "version": "3dd8fb15383c"
     },
@@ -121,6 +131,7 @@
       "invocation": "model",
       "platforms": {},
       "requires": [],
+      "sessionStart": false,
       "path": "skills/developers/diagnosing-bugs",
       "version": "a07f099e1997"
     },
@@ -131,6 +142,7 @@
       "invocation": "model",
       "platforms": {},
       "requires": [],
+      "sessionStart": false,
       "path": "skills/developers/pr-review",
       "version": "16d55ad3ab01"
     },
@@ -143,8 +155,9 @@
       "requires": [
         "ado-credentials"
       ],
+      "sessionStart": false,
       "path": "skills/qa/qa-ado-work-item",
-      "version": "689928601339"
+      "version": "32e56471a246"
     },
     {
       "name": "safety-ssh",
@@ -153,6 +166,7 @@
       "invocation": "model",
       "platforms": {},
       "requires": [],
+      "sessionStart": false,
       "path": "skills/ops/safety-ssh",
       "version": "7a1693d41270"
     }
@@ -213,7 +227,7 @@
         }
       ],
       "path": "workflows/qa/observation-to-work-item.md",
-      "version": "2e994abd1d20"
+      "version": "75d4bcce84e5"
     }
   ],
   "bundles": [

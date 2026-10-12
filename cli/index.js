@@ -9,6 +9,7 @@ const inst = require('../lib/install');
 const upd = require('../lib/update');
 const rc = require('../lib/receipt');
 const claude = require('../lib/adapters/claude');
+const legacy = require('../lib/legacy');
 
 const USAGE = `engcat — install and update the engineering catalog for Claude Code and GitHub Copilot.
 
@@ -188,6 +189,7 @@ async function cmdInstall(ctx) {
   if (!scope) { err('Unknown choice. Aborting.'); return 1; }
 
   const baseDir = inst.baseDirFor(scope, cwd, home);
+  migrateLegacy(ctx, { baseDir, scope, targets });
   const receipt = rc.readReceipt(baseDir);
   let code = 0;
   for (const target of targets) {
@@ -232,6 +234,50 @@ async function cmdInstall(ctx) {
   return code;
 }
 
+/**
+ * Clear what came before this catalog, ahead of planning: retired skills are moved out of
+ * the agent's sight, and the old assistant's PAT and contexts move into the folders the new
+ * skills read. Both halves only move, never delete, and are no-ops once done.
+ */
+function migrateLegacy(ctx, { baseDir, scope, targets }) {
+  const { catalog, root, home, out } = ctx;
+  for (const { from, to } of legacy.archiveRetiredSkills({ baseDir, targets, scope })) {
+    out(`  retired ${from} → moved to ${to}`);
+  }
+  const creds = catalog.skills.find((s) => s.name === 'ado-credentials');
+  const report = legacy.migrateLegacyState({
+    home,
+    getPatSource: creds ? path.join(root, creds.path, 'scripts', 'get-pat.ps1') : null,
+    restrictAccess: restrictToCurrentUser,
+  });
+  if (!report) return;
+  const parts = [];
+  if (report.pat === 'moved') parts.push('PAT moved');
+  if (report.pat === 'kept-existing') parts.push('PAT already in place, kept');
+  if (report.contexts.length) parts.push(`contexts moved: ${report.contexts.join(', ')}`);
+  if (report.skipped.length) parts.push(`already present, kept: ${report.skipped.join(', ')}`);
+  if (report.drafts) parts.push(`${plural(report.drafts, 'draft')} moved`);
+  out(`  migrated ${path.join(home, '.qa-ado-assistant')}: ${parts.join('; ') || 'nothing to carry over'}; old folder kept as ${report.archivedTo}`);
+  if (!report.contexts.length && !report.skipped.length) {
+    out('  no Azure DevOps project configured yet — open Copilot and ask it to add a project (board link + code links); the PAT is already stored');
+  }
+}
+
+/**
+ * Same lock setup.ps1 puts on its state folder: only the current account may read it.
+ * Granted by SID, not by name: icacls with an account name it cannot map would leave the
+ * folder with inheritance stripped and no grant, unreadable even to its owner.
+ */
+function restrictToCurrentUser(dir) {
+  if (process.platform !== 'win32') return;
+  try {
+    const csv = execFileSync('whoami.exe', ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const sid = (/"(S-1-[\d-]+)"/.exec(csv) || [])[1];
+    if (!sid) return;
+    execFileSync('icacls.exe', [dir, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`], { stdio: 'ignore' });
+  } catch { /* best effort: setup.ps1 applies the same lock when it runs */ }
+}
+
 /** The install records at the chosen scope, narrowed by --target when given. */
 function recordsAt(ctx, scope) {
   const { args, cwd, home } = ctx;
@@ -248,6 +294,7 @@ async function cmdUpdate(ctx) {
   if (!scope) { err('Unknown choice. Aborting.'); return 1; }
   const { baseDir, records } = recordsAt(ctx, scope);
   if (!records.length) { err(`nothing installed here (${baseDir}, ${scope}) — run engcat install`); return 1; }
+  migrateLegacy(ctx, { baseDir, scope, targets: records.map((r) => r.target) });
 
   // Refuse before touching anything: a downgrade of one record is a downgrade of the whole run.
   for (const record of records) {

@@ -46,29 +46,14 @@ locations above and that Copilot Chat is in Agent mode (next paragraph).
 
 ## 3. First run — the tester does this once, alone
 
-Two setups, in this order, both in a local PowerShell window — **never in a chat panel**.
-Anything typed into Copilot Chat is sent to a service and may be retained.
-
-**First, the credential** — the `ado-credentials` skill's setup:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "<path to ado-credentials>\scripts\setup.ps1"
-```
-
-It prompts for the PAT with masked input, protects it with DPAPI, asks for the
-organization URL, project and a short context name (e.g. `Acme-QA`), and verifies the
-credential actually reaches that project. Everything it writes lives in
-`%USERPROFILE%\.ado-credentials\`.
-
-**Then, the workspace** — this skill's:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "<path to qa-ado-work-item>\scripts\setup-workspace.ps1"
-```
-
-It picks up the context just created, lists the project's repositories, and clones the
-ones selected into a workspace folder. Its config and the drafts live in
-`%USERPROFILE%\.qa-ado-work-item\`.
+Nothing to run by hand: in the assistant, say *"add a project"* and give it the board link
+(any board, backlog, sprint or work item page) and the code links. It runs the
+`ado-credentials` scripts (`projects.ps1`, and `pat.ps1` when a token is needed — the token
+goes into a Notepad file, **never into a chat panel**), then this skill's
+`setup-workspace.ps1 -NoPrompt`, which clones the code links into
+`%USERPROFILE%\QA-Workspaces\<alias>\` and makes the team's area the default. Credentials
+live in `%USERPROFILE%\.ado-credentials\`, the workspace config and drafts in
+`%USERPROFILE%\.qa-ado-work-item\`. "I work in X now" switches the current project.
 
 Both folders are outside every repository, so a PAT or a draft can never be committed by
 accident. Run both again with a new context name to add a second project or product;

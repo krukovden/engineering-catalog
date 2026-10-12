@@ -71,3 +71,10 @@ test('git never prompts for credentials', () => {
   assert.ok(seen.includes('GCM_INTERACTIVE=never'), seen.join(' '));
   assert.ok(seen.includes('-c') && seen.includes('credential.interactive=false'), seen.join(' '));
 });
+
+test('--version answers from the receipt, inside the interval and without the network', () => {
+  const recent = home('1.0.5', new Date().toISOString());
+  const out = run(recent, fakeGit([]), ['--version', '--quiet']);
+  assert.match(out, /^engineering-catalog 1\.0\.5 is installed \(on .*, from https:\/\/example\/repo\)\.\n$/);
+  assert.equal(JSON.parse(run(recent, fakeGit([]), ['--version', '--json'])).additionalContext.startsWith('engineering-catalog 1.0.5 is installed'), true);
+});
