@@ -790,10 +790,12 @@ function reconcileQueryMinTime(projectState, { now = new Date(), firstRunDays = 
   const retryMin = retryableMinClosedDate(current.retryablePullRequests || []);
   const savedMin = parseIsoDate(current.queryMinTime);
   if (!current.lastCompletedPrClosedDate) {
+    // A saved floor belongs to a scan that has not finished: keep querying from it,
+    // as an ISO string, and never raise it to a retryable PR's later date.
+    if (savedMin) return savedMin.toISOString();
     const floor = new Date(now.getTime() - firstRunDays * 86400000).toISOString();
-    const lowerBound = savedMin || floor;
-    if (retryMin && retryMin > lowerBound) return retryMin;
-    return lowerBound;
+    if (retryMin && retryMin > floor) return retryMin;
+    return floor;
   }
   if (!retryMin) return current.lastCompletedPrClosedDate;
   return new Date(retryMin) < new Date(current.lastCompletedPrClosedDate)

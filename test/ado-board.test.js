@@ -2141,3 +2141,17 @@ test('L-m a PR returned on two pages is handled once and strands no retry entry'
   assert.deepEqual(saved.reconcile.retryablePullRequests.map((e) => e.pullRequestId), ['10']);
   assert.equal(saved.reconcile.processedPullRequests.length, 0);
 });
+
+test('a saved first-run floor is reused as an ISO string and is not raised to a retryable PR date', () => {
+  const { reconcileQueryMinTime } = require('../skills/shared/ado-board/scripts/lib');
+  const later = new Date('2026-10-14T12:00:00Z');
+  const state = { reconcile: {
+    queryMinTime: '2026-09-29T12:00:00.000Z',
+    retryablePullRequests: [{ id: 300, repositoryId: 'r', closedDate: '2026-10-12T13:00:00.000Z' }],
+  } };
+  const min = reconcileQueryMinTime(state, { now: later });
+  assert.equal(typeof min, 'string');
+  assert.equal(min, '2026-09-29T12:00:00.000Z');
+  assert.equal(new URLSearchParams({ 'searchCriteria.minTime': min }).toString(),
+    'searchCriteria.minTime=2026-09-29T12%3A00%3A00.000Z');
+});
