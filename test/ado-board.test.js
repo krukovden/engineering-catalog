@@ -2155,3 +2155,15 @@ test('a saved first-run floor is reused as an ISO string and is not raised to a 
   assert.equal(new URLSearchParams({ 'searchCriteria.minTime': min }).toString(),
     'searchCriteria.minTime=2026-09-29T12%3A00%3A00.000Z');
 });
+
+test('an environment PAT authenticates on every platform, without az login', () => {
+  const { createTransport, envPat } = require('../skills/shared/ado-board/scripts/lib');
+  const context = { organization: 'https://dev.azure.com/o', project: 'p' };
+  const expected = `Basic ${Buffer.from(':secret-pat', 'utf8').toString('base64')}`;
+  for (const platform of ['linux', 'darwin', 'win32']) {
+    const transport = createTransport({ context, env: { AZURE_DEVOPS_EXT_PAT: 'secret-pat' }, platform, fetchImpl: async () => ({}) });
+    assert.equal(transport.authHeader, expected);
+  }
+  assert.equal(envPat({ ADO_PAT: ' alt ' }), 'alt');
+  assert.equal(envPat({}), null);
+});

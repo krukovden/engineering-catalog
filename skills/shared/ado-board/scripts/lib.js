@@ -1533,9 +1533,16 @@ class HttpAzureDevOpsTransport {
   }
 }
 
+function envPat(env = process.env) {
+  return String(env.AZURE_DEVOPS_EXT_PAT || env.ADO_PAT || '').trim() || null;
+}
+
 function createTransport({ context, env = process.env, platform = process.platform, fetchImpl } = {}) {
-  const authHeader = platform === 'win32'
-    ? `Basic ${Buffer.from(`:${getWindowsPat(env)}`, 'utf8').toString('base64')}`
+  // A PAT in the environment wins on every platform: a container or CI runner
+  // has no Entra sign-in for `az account get-access-token` to use.
+  const pat = envPat(env) || (platform === 'win32' ? getWindowsPat(env) : null);
+  const authHeader = pat
+    ? `Basic ${Buffer.from(`:${pat}`, 'utf8').toString('base64')}`
     : `Bearer ${getAzToken()}`;
   return new HttpAzureDevOpsTransport({ context, authHeader, fetchImpl });
 }
@@ -1569,6 +1576,7 @@ module.exports = {
   reconcileBoard,
   resolveAdoContext,
   createTransport,
+  envPat,
   HttpAzureDevOpsTransport,
   manualEvidenceComment,
   repoRoot,
