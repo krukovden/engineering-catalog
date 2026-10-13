@@ -71,3 +71,24 @@ That changed the purpose of the state file from "shared source of truth for repl
 to "local cache that avoids rescanning work this machine already handled". The trade-off is
 intentional: the file can stay local and stop dirtying worktrees on no-op hook runs, while
 correctness still comes from Azure DevOps history and the repository's own timestamps.
+
+### e-20261012-b92d Reconcile now proves human-vs-ado-board state changes from work item history
+- status: active
+- evidence: confirmed
+- pr: none
+- sha-at-write: 8448f5a4246f5ae6b2123748d23926b9791c0c30
+- merged-sha: none
+- supersedes: none
+- superseded-by: none
+- date: 2026-10-12
+
+Replay guards now distinguish human changes from ado-board's own earlier moves by reading the
+work item's update history and looking for ado-board's evidence-comment marker on state
+transitions. A plain `StateChangeDate > PR close time` check was not enough: squash-merge
+timing meant reconcile's own todo→doing move could look like a later reopen and permanently
+block the completed-PR move to done.
+
+The local reconcile file also grew a bounded retryable-PR set beside the processed-PR set.
+That keeps older failed PRs queryable even after later PRs succeed and advance the happy-path
+watermark. The trade-off is slightly more local state, but it preserves retry safety without
+going back to unbounded rescans.

@@ -49,24 +49,31 @@ function httpError(status, message) {
 class FakeTransport {
   constructor({
     items = {},
+    updates = {},
     prs = [],
     activeIds = [],
     types = [],
     states = {},
     getErrors = {},
+    getUpdatesErrors = {},
     failMove = null,
     failMoveById = {},
     listPrError = null,
+    moveTimestamp = '2026-10-12T15:00:00.000Z',
   } = {}) {
     this.items = new Map(Object.entries(items).map(([id, item]) => [String(id), structuredClone(item)]));
+    this.updates = new Map(Object.entries(updates).map(([id, itemUpdates]) => [String(id), structuredClone(itemUpdates)]));
     this.prs = structuredClone(prs);
     this.activeIds = activeIds.map(String);
     this.types = types;
     this.states = states;
     this.getErrors = new Map(Object.entries(getErrors).map(([id, error]) => [String(id), error]));
+    this.getUpdatesErrors = new Map(Object.entries(getUpdatesErrors).map(([id, error]) => [String(id), error]));
     this.failMove = failMove;
     this.failMoveById = new Map(Object.entries(failMoveById).map(([id, error]) => [String(id), error]));
     this.listPrError = listPrError;
+    this.moveTimestamp = moveTimestamp;
+    this.moveCount = 0;
     this.moves = [];
     this.prQueries = [];
   }
@@ -87,13 +94,33 @@ class FakeTransport {
     return structuredClone(item);
   }
 
+  async getWorkItemUpdates(_context, id) {
+    const key = String(id);
+    if (this.getUpdatesErrors.has(key)) throw this.getUpdatesErrors.get(key);
+    return structuredClone(this.updates.get(key) || []);
+  }
+
   async moveWorkItemState(_context, { id, rev, state, comment }) {
     const key = String(id);
     if (this.failMoveById.has(key)) throw this.failMoveById.get(key);
     if (this.failMove) throw this.failMove;
     const item = this.items.get(key);
+    const revisedDate = new Date(new Date(this.moveTimestamp).getTime() + (this.moveCount * 60000)).toISOString();
+    this.moveCount += 1;
     item.rev = rev + 1;
     item.fields['System.State'] = state;
+    item.fields['Microsoft.VSTS.Common.StateChangeDate'] = revisedDate;
+    item.fields['System.ChangedDate'] = revisedDate;
+    const itemUpdates = this.updates.get(key) || [];
+    itemUpdates.push({
+      revisedDate,
+      revisedBy: { displayName: 'ado-board reconcile' },
+      fields: {
+        'System.State': { newValue: state },
+        'System.History': { newValue: comment },
+      },
+    });
+    this.updates.set(key, itemUpdates);
     this.moves.push({ id: key, state, comment });
     return structuredClone(item);
   }
@@ -231,6 +258,18 @@ test('parseAzureReposRemote recognises Azure HTTPS, userinfo, visualstudio, and 
     project: 'Catalog',
     repository: 'engineering-catalog',
   });
+  assert.deepEqual(parseAzureReposRemote('https://hal@hal.visualstudio.com/Catalog/_git/Repo'), {
+    organization: 'https://hal.visualstudio.com',
+    organizationId: 'hal',
+    project: 'Catalog',
+    repository: 'Repo',
+  });
+  assert.deepEqual(parseAzureReposRemote('https://hal.visualstudio.com/DefaultCollection/Catalog/_git/Repo'), {
+    organization: 'https://hal.visualstudio.com',
+    organizationId: 'hal',
+    project: 'Catalog',
+    repository: 'Repo',
+  });
   assert.deepEqual(parseAzureReposRemote('git@ssh.dev.azure.com:v3/HAL-TSS/TSS-Orion/Repo'), {
     organization: 'https://dev.azure.com/HAL-TSS',
     organizationId: 'HAL-TSS',
@@ -241,6 +280,12 @@ test('parseAzureReposRemote recognises Azure HTTPS, userinfo, visualstudio, and 
     organization: 'https://dev.azure.com/HAL-TSS',
     organizationId: 'HAL-TSS',
     project: 'TSS-Orion',
+    repository: 'Repo',
+  });
+  assert.deepEqual(parseAzureReposRemote('hal@vs-ssh.visualstudio.com:v3/hal/Catalog/Repo'), {
+    organization: 'https://hal.visualstudio.com',
+    organizationId: 'hal',
+    project: 'Catalog',
     repository: 'Repo',
   });
 });
@@ -428,6 +473,72 @@ test('move refuses backwards movement, reports required fields, and only allows 
   });
   assert.equal(allowed.ok, true);
   assert.equal(allowed.to, 'doing');
+});
+
+test('CLI move passes --allow-idp through to the move command', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'ado-board-cli-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ado-home-'));
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'ado-bin-'));
+  const stateFile = path.join(cwd, '.engineering-catalog', 'ado-board.json');
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  fs.writeFileSync(stateFile, JSON.stringify({
+    version: 1,
+    organization: 'https://dev.azure.com/example',
+    project: 'Catalog',
+    stateMap: createStateMap(),
+  }, null, 2));
+  writeAdoConfig(home, 'https://dev.azure.com/example', 'Catalog');
+  fs.writeFileSync(path.join(bin, 'az'), `#!/bin/sh\nif [ \"$1\" = \"account\" ]; then\n  printf '{\"accessToken\":\"token\"}\\n'\n  exit 0\nfi\nexit 2\n`);
+  fs.chmodSync(path.join(bin, 'az'), 0o755);
+  const mockFetch = path.join(cwd, 'mock-fetch.js');
+  fs.writeFileSync(mockFetch, `
+global.fetch = async (url, options) => {
+  const body = JSON.stringify({
+    id: 14,
+    rev: 2,
+    fields: {
+      "System.WorkItemType": "Product Backlog Item",
+      "System.State": "Committed",
+      "System.Tags": "idp:claimed",
+      "System.Title": "Runner card",
+      "Microsoft.VSTS.Common.StateChangeDate": "2026-10-12T16:00:00.000Z",
+      "System.ChangedDate": "2026-10-12T16:00:00.000Z"
+    }
+  });
+  if (String(url).includes('/workitems/14?')) {
+    if ((options && options.method) === 'PATCH') return { ok: true, text: async () => body };
+    return { ok: true, text: async () => JSON.stringify({
+      id: 14,
+      rev: 1,
+      fields: {
+        "System.WorkItemType": "Product Backlog Item",
+        "System.State": "New",
+        "System.Tags": "idp:claimed",
+        "System.Title": "Runner card",
+        "Microsoft.VSTS.Common.StateChangeDate": "2026-10-12T15:00:00.000Z",
+        "System.ChangedDate": "2026-10-12T15:00:00.000Z"
+      }
+    }) };
+  }
+  throw new Error('unexpected url ' + url);
+};
+`);
+
+  const result = spawnSync('node', [SCRIPT, 'move', '14', 'doing', '--allow-idp', '--json'], {
+    cwd,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      ENGCAT_HOME: home,
+      PATH: `${bin}:${process.env.PATH}`,
+      NODE_OPTIONS: `--require ${mockFetch}`,
+    },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.to, 'doing');
 });
 
 test('resolveAdoContext derives Azure context from origin and refuses config or state mismatches', () => {
@@ -660,6 +771,25 @@ test('reconcile records per-item skips, keeps earlier moves, maps alternate stat
   ]);
 });
 
+test('reconcile reports branch-loop getWorkItem 500 as move-error', async () => {
+  const { repo } = createRepo();
+  createPushedBranch(repo, 'feature/ADO-101-catalog-sync', 'one.txt', 'one');
+  git(repo, 'fetch', 'origin');
+
+  const result = await reconcileBoard({
+    transport: new FakeTransport({
+      getErrors: { 101: httpError(500, 'server exploded') },
+    }),
+    context: {},
+    stateMap: createStateMap(),
+    cwd: repo,
+    staleDays: 30,
+    throttleHours: 0,
+  });
+
+  assert.equal(result.skipped[0].reason, 'move-error');
+});
+
 test('reconcile does not replay a completed PR onto an item changed after the PR closed', async () => {
   const { repo } = createRepo();
   git(repo, 'fetch', 'origin');
@@ -678,6 +808,16 @@ test('reconcile does not replay a completed PR onto an item changed after the PR
           'System.ChangedDate': '2026-10-12T14:00:00.000Z',
         },
       },
+    },
+    updates: {
+      303: [{
+        revisedDate: '2026-10-12T14:00:00.000Z',
+        revisedBy: { displayName: 'QA Engineer' },
+        fields: {
+          'System.State': { newValue: 'Committed' },
+          'System.History': { newValue: 'QA reopened after verification failed.' },
+        },
+      }],
     },
     prs: [{
       pullRequestId: 55,
@@ -723,6 +863,16 @@ test('reconcile does not replay a branch onto an item moved back to todo after t
           'System.ChangedDate': new Date(new Date(branchCommittedAt).getTime() + 60000).toISOString(),
         },
       },
+    },
+    updates: {
+      101: [{
+        revisedDate: new Date(new Date(branchCommittedAt).getTime() + 60000).toISOString(),
+        revisedBy: { displayName: 'Product Owner' },
+        fields: {
+          'System.State': { newValue: 'New' },
+          'System.History': { newValue: 'Moved back to todo while scope changed.' },
+        },
+      }],
     },
   });
 
@@ -802,6 +952,117 @@ test('reconcile records processed pull requests and does not reapply them after 
 
   assert.deepEqual(second.changed, []);
   assert.equal(transport.items.get('303').fields['System.State'], 'Active');
+});
+
+test('reconcile does not treat its own branch move as a manual reopen before the completed PR move', async () => {
+  const { repo } = createRepo();
+  createPushedBranch(repo, 'feature/ADO-5-squash-merge', 'feature.txt', 'feature work');
+  git(repo, 'fetch', 'origin');
+
+  const transport = new FakeTransport({
+    items: {
+      5: {
+        id: 5,
+        rev: 1,
+        fields: {
+          'System.WorkItemType': 'Product Backlog Item',
+          'System.State': 'New',
+          'System.Tags': '',
+          'System.Title': 'Squash merged item',
+          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-12T13:00:00.000Z',
+          'System.ChangedDate': '2026-10-12T13:00:00.000Z',
+        },
+      },
+    },
+    prs: [{
+      pullRequestId: 10,
+      sourceRefName: 'refs/heads/feature/ADO-5-squash-merge',
+      targetRefName: 'refs/heads/main',
+      creationDate: '2026-10-12T13:00:00.000Z',
+      closedDate: '2026-10-12T14:00:00.000Z',
+      workItemRefs: [{ id: 5 }],
+    }],
+    moveTimestamp: '2026-10-12T15:00:00.000Z',
+  });
+
+  const result = await reconcileBoard({
+    transport,
+    context: {},
+    stateMap: createStateMap(),
+    cwd: repo,
+    staleDays: 30,
+    throttleHours: 0,
+    projectState: { stateMap: createStateMap() },
+  });
+
+  assert.deepEqual(result.changed.map((entry) => ({ id: entry.id, to: entry.to })), [
+    { id: '5', to: 'doing' },
+    { id: '5', to: 'done' },
+  ]);
+  assert.equal(transport.items.get('5').fields['System.State'], 'Done');
+});
+
+test('reconcile does not treat a prior ado-board branch move as a manual reopen on a later run', async () => {
+  const { repo } = createRepo();
+  git(repo, 'fetch', 'origin');
+  const initialState = {
+    version: 1,
+    organization: 'https://dev.azure.com/example',
+    project: 'Catalog',
+    stateMap: createStateMap(),
+  };
+  const stateFile = createStateFile(repo, initialState);
+
+  const transport = new FakeTransport({
+    items: {
+      5: {
+        id: 5,
+        rev: 2,
+        fields: {
+          'System.WorkItemType': 'Product Backlog Item',
+          'System.State': 'Committed',
+          'System.Tags': '',
+          'System.Title': 'Already doing from ado-board',
+          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-12T15:00:00.000Z',
+          'System.ChangedDate': '2026-10-12T15:00:00.000Z',
+        },
+      },
+    },
+    updates: {
+      5: [{
+        revisedDate: '2026-10-12T15:00:00.000Z',
+        revisedBy: { displayName: 'ado-board reconcile' },
+        fields: {
+          'System.State': { newValue: 'Committed' },
+          'System.History': { newValue: 'ado-board: moved to doing after pushed work on feature/ADO-5-squash-merge (1234567).' },
+        },
+      }],
+    },
+    prs: [{
+      pullRequestId: 10,
+      sourceRefName: 'refs/heads/feature/ADO-5-squash-merge',
+      targetRefName: 'refs/heads/main',
+      creationDate: '2026-10-12T13:00:00.000Z',
+      closedDate: '2026-10-12T14:00:00.000Z',
+      workItemRefs: [{ id: 5 }],
+    }],
+  });
+
+  const result = await reconcileBoard({
+    transport,
+    context: {},
+    stateMap: initialState.stateMap,
+    cwd: repo,
+    staleDays: 30,
+    throttleHours: 0,
+    stateFile,
+    projectState: initialState,
+  });
+
+  assert.deepEqual(result.changed.map((entry) => ({ id: entry.id, to: entry.to })), [
+    { id: '5', to: 'done' },
+  ]);
+  assert.equal(transport.items.get('5').fields['System.State'], 'Done');
 });
 
 test('reconcile filters completed PRs to the repo base branch and only asks for newer ones', async () => {
@@ -970,7 +1231,6 @@ test('reconcile retries a completed PR after a transient move error instead of m
     stateMap: createStateMap(),
   };
   const stateFile = createStateFile(repo, initialState);
-  const before = fs.readFileSync(stateFile, 'utf8');
   const retryable = httpError(500, 'server exploded');
 
   const firstTransport = new FakeTransport({
@@ -1010,7 +1270,8 @@ test('reconcile retries a completed PR after a transient move error instead of m
     projectState: initialState,
   });
   assert.equal(first.skipped[0].reason, 'move-error');
-  assert.equal(fs.readFileSync(stateFile, 'utf8'), before);
+  const savedAfterFirst = loadProjectState(stateFile);
+  assert.equal(savedAfterFirst.reconcile.retryablePullRequests[0].pullRequestId, '55');
 
   const secondTransport = new FakeTransport({
     items: {
@@ -1047,6 +1308,198 @@ test('reconcile retries a completed PR after a transient move error instead of m
     stateFile,
     projectState: initialState,
   });
+  assert.deepEqual(second.changed.map((entry) => entry.id), ['303']);
+});
+
+test('reconcile keeps retryable older PRs queryable even after a later PR succeeds', async () => {
+  const { repo } = createRepo();
+  git(repo, 'fetch', 'origin');
+  const initialState = {
+    version: 1,
+    organization: 'https://dev.azure.com/example',
+    project: 'Catalog',
+    stateMap: createStateMap(),
+  };
+  const stateFile = createStateFile(repo, initialState);
+  const retryable = httpError(500, 'server exploded');
+
+  const firstTransport = new FakeTransport({
+    items: {
+      1: {
+        id: 1,
+        rev: 1,
+        fields: {
+          'System.WorkItemType': 'Product Backlog Item',
+          'System.State': 'Committed',
+          'System.Tags': '',
+          'System.Title': 'Older retryable PR',
+          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-01T00:00:00.000Z',
+          'System.ChangedDate': '2026-10-01T00:00:00.000Z',
+        },
+      },
+      2: {
+        id: 2,
+        rev: 1,
+        fields: {
+          'System.WorkItemType': 'Product Backlog Item',
+          'System.State': 'Committed',
+          'System.Tags': '',
+          'System.Title': 'Later successful PR',
+          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-01T00:00:00.000Z',
+          'System.ChangedDate': '2026-10-01T00:00:00.000Z',
+        },
+      },
+    },
+    failMoveById: { 1: retryable },
+    prs: [
+      {
+        pullRequestId: 1,
+        sourceRefName: 'refs/heads/feature/ADO-1-retry',
+        targetRefName: 'refs/heads/main',
+        creationDate: '2026-10-10T09:00:00.000Z',
+        closedDate: '2026-10-12T10:00:00.000Z',
+        workItemRefs: [{ id: 1 }],
+      },
+      {
+        pullRequestId: 2,
+        sourceRefName: 'refs/heads/feature/ADO-2-success',
+        targetRefName: 'refs/heads/main',
+        creationDate: '2026-10-10T09:00:00.000Z',
+        closedDate: '2026-10-12T11:00:00.000Z',
+        workItemRefs: [{ id: 2 }],
+      },
+    ],
+  });
+
+  await reconcileBoard({
+    transport: firstTransport,
+    context: {},
+    stateMap: initialState.stateMap,
+    cwd: repo,
+    staleDays: 30,
+    throttleHours: 0,
+    stateFile,
+    projectState: initialState,
+  });
+
+  const saved = loadProjectState(stateFile);
+  assert.equal(saved.reconcile.lastCompletedPrClosedDate, null);
+  assert.equal(saved.reconcile.retryablePullRequests[0].pullRequestId, '1');
+
+  const secondTransport = new FakeTransport({
+    items: {
+      1: {
+        id: 1,
+        rev: 1,
+        fields: {
+          'System.WorkItemType': 'Product Backlog Item',
+          'System.State': 'Committed',
+          'System.Tags': '',
+          'System.Title': 'Older retryable PR',
+          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-01T00:00:00.000Z',
+          'System.ChangedDate': '2026-10-01T00:00:00.000Z',
+        },
+      },
+    },
+    prs: [{
+      pullRequestId: 1,
+      sourceRefName: 'refs/heads/feature/ADO-1-retry',
+      targetRefName: 'refs/heads/main',
+      creationDate: '2026-10-10T09:00:00.000Z',
+      closedDate: '2026-10-12T10:00:00.000Z',
+      workItemRefs: [{ id: 1 }],
+    }],
+  });
+
+  const second = await reconcileBoard({
+    transport: secondTransport,
+    context: {},
+    stateMap: initialState.stateMap,
+    cwd: repo,
+    staleDays: 30,
+    throttleHours: 0,
+    stateFile,
+    projectState: saved,
+  });
+
+  assert.deepEqual(second.changed.map((entry) => entry.id), ['1']);
+  assert.equal(secondTransport.prQueries[0].minTime, '2026-10-12T10:00:00.000Z');
+});
+
+test('reconcile retries a PR when getWorkItem fails with 500 in the completed-pr loop', async () => {
+  const { repo } = createRepo();
+  git(repo, 'fetch', 'origin');
+  const initialState = {
+    version: 1,
+    organization: 'https://dev.azure.com/example',
+    project: 'Catalog',
+    stateMap: createStateMap(),
+  };
+  const stateFile = createStateFile(repo, initialState);
+
+  const firstTransport = new FakeTransport({
+    getErrors: { 303: httpError(500, 'server exploded') },
+    prs: [{
+      pullRequestId: 55,
+      sourceRefName: 'refs/heads/feature/ADO-303-retryable',
+      targetRefName: 'refs/heads/main',
+      creationDate: '2026-10-10T09:00:00.000Z',
+      closedDate: '2026-10-12T13:00:00.000Z',
+      workItemRefs: [{ id: 303 }],
+    }],
+  });
+
+  const first = await reconcileBoard({
+    transport: firstTransport,
+    context: {},
+    stateMap: initialState.stateMap,
+    cwd: repo,
+    staleDays: 30,
+    throttleHours: 0,
+    stateFile,
+    projectState: initialState,
+  });
+  assert.equal(first.skipped[0].reason, 'move-error');
+
+  const saved = loadProjectState(stateFile);
+  assert.equal(saved.reconcile.retryablePullRequests[0].pullRequestId, '55');
+
+  const secondTransport = new FakeTransport({
+    items: {
+      303: {
+        id: 303,
+        rev: 5,
+        fields: {
+          'System.WorkItemType': 'Product Backlog Item',
+          'System.State': 'Committed',
+          'System.Tags': '',
+          'System.Title': 'Retryable item',
+          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-01T00:00:00.000Z',
+          'System.ChangedDate': '2026-10-01T00:00:00.000Z',
+        },
+      },
+    },
+    prs: [{
+      pullRequestId: 55,
+      sourceRefName: 'refs/heads/feature/ADO-303-retryable',
+      targetRefName: 'refs/heads/main',
+      creationDate: '2026-10-10T09:00:00.000Z',
+      closedDate: '2026-10-12T13:00:00.000Z',
+      workItemRefs: [{ id: 303 }],
+    }],
+  });
+
+  const second = await reconcileBoard({
+    transport: secondTransport,
+    context: {},
+    stateMap: initialState.stateMap,
+    cwd: repo,
+    staleDays: 30,
+    throttleHours: 0,
+    stateFile,
+    projectState: saved,
+  });
+
   assert.deepEqual(second.changed.map((entry) => entry.id), ['303']);
 });
 

@@ -11,6 +11,7 @@ const STATE_FILE_VERSION = 1;
 const DEFAULT_STALE_DAYS = 7;
 const DEFAULT_THROTTLE_HOURS = 12;
 const RECONCILE_MARKER_LIMIT = 200;
+const OWN_MARKER_PREFIX = 'ado-board:';
 const CATEGORY_TO_BUCKET = {
   Proposed: 'todo',
   InProgress: 'doing',
@@ -259,7 +260,7 @@ function parseAzureReposRemote(remoteUrl) {
     };
   }
 
-  match = /^https:\/\/([^./]+)\.visualstudio\.com\/([^/]+)\/_git\/([^/?#]+)(?:[/?#]|$)/i.exec(text);
+  match = /^https:\/\/(?:[^@/]+@)?([^./]+)\.visualstudio\.com\/(?:DefaultCollection\/)?([^/]+)\/_git\/([^/?#]+)(?:[/?#]|$)/i.exec(text);
   if (match) {
     const organizationId = decodeURIComponent(match[1]);
     return {
@@ -275,6 +276,17 @@ function parseAzureReposRemote(remoteUrl) {
     const organizationId = decodeURIComponent(match[1]);
     return {
       organization: normalizeOrganization(`https://dev.azure.com/${organizationId}`),
+      organizationId,
+      project: decodeURIComponent(match[2]),
+      repository: decodeURIComponent(match[3]),
+    };
+  }
+
+  match = /^(?:ssh:\/\/)?[^@]+@vs-ssh\.visualstudio\.com[:/]v3\/([^/]+)\/([^/]+)\/([^/?#]+)(?:[/?#]|$)/i.exec(text);
+  if (match) {
+    const organizationId = decodeURIComponent(match[1]);
+    return {
+      organization: normalizeOrganization(`https://${organizationId}.visualstudio.com`),
       organizationId,
       project: decodeURIComponent(match[2]),
       repository: decodeURIComponent(match[3]),
@@ -436,7 +448,7 @@ function completedPrComment(pr, repository, targetBucket) {
   const prId = pr.pullRequestId || pr.id || 'unknown';
   const source = pr.sourceRefName || 'unknown source branch';
   const marker = repository ? ` [ado-board reconcile ${repository}#${prId}]` : ` [ado-board reconcile #${prId}]`;
-  return `ado-board: moved to ${targetBucket} after completed PR #${prId} from ${source}.${marker}`;
+  return `${OWN_MARKER_PREFIX} moved to ${targetBucket} after completed PR #${prId} from ${source}.${marker}`;
 }
 
 async function moveWorkItem({
@@ -551,6 +563,48 @@ function shouldSkipCompletedPrReplay(item, pr) {
   return Boolean(changedAt && closedAt && changedAt > closedAt);
 }
 
+function isOwnMarkerComment(value) {
+  return String(value || '').includes(OWN_MARKER_PREFIX);
+}
+
+function extractUpdateField(update, fieldName) {
+  return update?.fields?.[fieldName] || update?.fields?.[fieldName.replace(/\./g, '_')] || null;
+}
+
+function fieldValue(field) {
+  if (!field) return null;
+  if (typeof field === 'string') return field;
+  if (typeof field === 'object') {
+    if (typeof field.newValue === 'string') return field.newValue;
+    if (typeof field.value === 'string') return field.value;
+  }
+  return null;
+}
+
+function isOwnStateTransitionUpdate(update) {
+  const stateField = extractUpdateField(update, 'System.State');
+  if (!stateField) return false;
+  const history = fieldValue(extractUpdateField(update, 'System.History'));
+  if (isOwnMarkerComment(history)) return true;
+  const comment = fieldValue(extractUpdateField(update, 'System.Comment'));
+  if (isOwnMarkerComment(comment)) return true;
+  const revisedBy = update?.revisedBy?.displayName || update?.revisedBy?.uniqueName || update?.revisedBy?.name || '';
+  return /ado-board/i.test(String(revisedBy)) && (isOwnMarkerComment(history) || isOwnMarkerComment(comment));
+}
+
+function latestNonOwnStateChangeDateFromUpdates(updates = []) {
+  const candidates = [];
+  for (const update of updates) {
+    if (isOwnStateTransitionUpdate(update)) continue;
+    const stateField = extractUpdateField(update, 'System.State');
+    if (!stateField) continue;
+    const when = parseIsoDate(update?.revisedDate || fieldValue(extractUpdateField(update, 'System.ChangedDate')) || fieldValue(extractUpdateField(update, 'Microsoft.VSTS.Common.StateChangeDate')));
+    if (when) candidates.push(when);
+  }
+  candidates.sort((a, b) => b.getTime() - a.getTime());
+  return candidates[0] || null;
+}
+
 function parseMarkdownLinks(markdown) {
   const links = [];
   const pattern = /\[([^\]]+)\]\(([^)]+)\)/g;
@@ -645,6 +699,10 @@ function completedPullRequestKey(repository, pr) {
   ].join('::');
 }
 
+function retryPullRequestKey(entry) {
+  return String(entry?.key || '');
+}
+
 function latestClosedDate(prs) {
   const valid = prs
     .map((pr) => new Date(pr.closedDate || 0))
@@ -670,9 +728,72 @@ function nextReconcileState(projectState, processedPullRequests) {
   }
   const lastCompletedPrClosedDate = latestClosedDate(deduped) || current.lastCompletedPrClosedDate || null;
   return {
-    ...(current.lastCompletedPrClosedDate ? { lastCompletedPrClosedDate: current.lastCompletedPrClosedDate } : {}),
     lastCompletedPrClosedDate,
     processedPullRequests: deduped,
+  };
+}
+
+function mergeRetryablePullRequests(current = [], next = []) {
+  const merged = [...current, ...next];
+  const deduped = [];
+  const seen = new Set();
+  for (const entry of merged.slice().sort((a, b) => {
+    const left = new Date(a.closedDate || 0).getTime();
+    const right = new Date(b.closedDate || 0).getTime();
+    return left - right;
+  })) {
+    const key = retryPullRequestKey(entry);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(entry);
+    if (deduped.length >= RECONCILE_MARKER_LIMIT) break;
+  }
+  return deduped;
+}
+
+function retryableMinClosedDate(entries = []) {
+  const valid = entries
+    .map((entry) => parseIsoDate(entry.closedDate))
+    .filter(Boolean)
+    .sort((a, b) => a.getTime() - b.getTime());
+  return valid[0] ? valid[0].toISOString() : null;
+}
+
+function reconcileQueryMinTime(projectState) {
+  const current = projectState?.reconcile || {};
+  const retryMin = retryableMinClosedDate(current.retryablePullRequests || []);
+  if (!current.lastCompletedPrClosedDate) return retryMin;
+  if (!retryMin) return current.lastCompletedPrClosedDate;
+  return new Date(retryMin) < new Date(current.lastCompletedPrClosedDate)
+    ? retryMin
+    : current.lastCompletedPrClosedDate;
+}
+
+function updateRetryablePullRequests(currentRetryable, retryableThisRun, processedThisRun) {
+  const processedKeys = new Set(processedThisRun.map((entry) => entry.key));
+  const pendingCurrent = (currentRetryable || []).filter((entry) => !processedKeys.has(retryPullRequestKey(entry)));
+  return mergeRetryablePullRequests(pendingCurrent, retryableThisRun);
+}
+
+function contiguousSuccessClosedDate(processedPullRequests, retryablePullRequests) {
+  const retryMin = retryableMinClosedDate(retryablePullRequests);
+  const eligible = processedPullRequests
+    .map((entry) => parseIsoDate(entry.closedDate))
+    .filter(Boolean)
+    .filter((date) => !retryMin || date.toISOString() < retryMin)
+    .sort((a, b) => b.getTime() - a.getTime());
+  return eligible[0] ? eligible[0].toISOString() : null;
+}
+
+function buildNextReconcileState(projectState, processedPullRequests, retryablePullRequests) {
+  const current = projectState?.reconcile || {};
+  const nextProcessed = nextReconcileState(projectState, processedPullRequests).processedPullRequests;
+  const nextRetryable = updateRetryablePullRequests(current.retryablePullRequests || [], retryablePullRequests, nextProcessed);
+  const contiguousClosedDate = contiguousSuccessClosedDate(nextProcessed, nextRetryable);
+  return {
+    lastCompletedPrClosedDate: contiguousClosedDate || current.lastCompletedPrClosedDate || null,
+    processedPullRequests: nextProcessed,
+    ...(nextRetryable.length ? { retryablePullRequests: nextRetryable } : {}),
   };
 }
 
@@ -681,9 +802,11 @@ function reconcileStateChanged(projectState, nextReconcile) {
   return JSON.stringify({
     lastCompletedPrClosedDate: current.lastCompletedPrClosedDate || null,
     processedPullRequests: current.processedPullRequests || [],
+    retryablePullRequests: current.retryablePullRequests || [],
   }) !== JSON.stringify({
     lastCompletedPrClosedDate: nextReconcile.lastCompletedPrClosedDate || null,
     processedPullRequests: nextReconcile.processedPullRequests || [],
+    retryablePullRequests: nextReconcile.retryablePullRequests || [],
   });
 }
 
@@ -725,12 +848,15 @@ async function reconcileBoard({
   const azureRemote = parseAzureReposRemote(origin);
   const repository = azureRemote?.repository || parseRepositoryName(origin);
   const workCache = new Map();
+  const workItemUpdatesCache = new Map();
   const moves = [];
   const skipped = [];
   const processedPullRequests = [];
+  const retryablePullRequests = [];
   const processedPullRequestKeys = new Set(
     (projectState?.reconcile?.processedPullRequests || []).map((entry) => entry.key),
   );
+  const movedByReconcile = new Set();
   const latestBranchById = new Map();
   for (const branch of branchScan.branches.filter((entry) => entry.parsed)) {
     const current = latestBranchById.get(branch.parsed.id);
@@ -742,6 +868,22 @@ async function reconcileBoard({
   async function getWorkItemCached(id) {
     if (!workCache.has(id)) workCache.set(id, await transport.getWorkItem(context, id));
     return workCache.get(id);
+  }
+
+  async function getWorkItemUpdatesCached(id) {
+    if (!workItemUpdatesCache.has(id)) workItemUpdatesCache.set(id, await transport.getWorkItemUpdates(context, id));
+    return workItemUpdatesCache.get(id);
+  }
+
+  async function wasChangedBySomeoneElseAfter(id, boundaryDate) {
+    if (!boundaryDate) return false;
+    const item = await getWorkItemCached(id);
+    const changedAt = itemStateChangedAt(item);
+    if (!changedAt || changedAt <= boundaryDate) return false;
+    if (movedByReconcile.has(String(id))) return false;
+    const updates = await getWorkItemUpdatesCached(id);
+    const latestNonOwn = latestNonOwnStateChangeDateFromUpdates(updates);
+    return Boolean(latestNonOwn && latestNonOwn > boundaryDate);
   }
 
   function pushSkipped(entry) {
@@ -791,6 +933,7 @@ async function reconcileBoard({
       });
       if (result.ok && !result.noop && result.workItem) {
         workCache.set(String(id), result.workItem);
+        movedByReconcile.add(String(id));
         moves.push({
           id: String(id),
           from: result.from,
@@ -837,7 +980,7 @@ async function reconcileBoard({
     const typeMap = stateMap[item.fields['System.WorkItemType']];
     const bucket = inferBucketForState(typeMap, item.fields['System.State']);
     if (bucket === 'todo') {
-      if (shouldSkipBranchReplay(item, branch)) {
+      if (shouldSkipBranchReplay(item, branch) && await wasChangedBySomeoneElseAfter(id, parseIsoDate(branch.committedAt))) {
         pushSkipped({
           id,
           reason: 'branch-replayed-after-manual-change',
@@ -862,7 +1005,7 @@ async function reconcileBoard({
   const prQuery = {
     repository,
     targetRefName: branchScan.baseRef ? `refs/heads/${branchScan.baseRef.replace(/^origin\//, '')}` : null,
-    minTime: projectState?.reconcile?.lastCompletedPrClosedDate || null,
+    minTime: reconcileQueryMinTime(projectState),
     queryTimeRangeType: 'closed',
   };
   const prs = await transport.listCompletedPullRequests(context, prQuery);
@@ -882,13 +1025,14 @@ async function reconcileBoard({
       try {
         item = await getWorkItemCached(id);
       } catch (error) {
-        const skippedError = skippableReconcileError(error) || { code: 'work-item-missing', message: String(error.message || error) };
+        const skippedError = skippableReconcileError(error) || { code: 'move-error', message: String(error.message || error) };
         pushSkipped({ id, reason: skippedError.code, source: 'completed-pr', message: skippedError.message, pullRequest: prRef });
+        prRef.retryable = prRef.retryable || skippedError.code !== 'work-item-missing';
         continue;
       }
       const typeMap = stateMap[item.fields['System.WorkItemType']];
       const targetBucket = item.fields['System.WorkItemType'] === 'Bug' ? 'verify' : 'done';
-      if (shouldSkipCompletedPrReplay(item, pr)) {
+      if (shouldSkipCompletedPrReplay(item, pr) && await wasChangedBySomeoneElseAfter(id, parseIsoDate(pr.closedDate))) {
         pushSkipped({
           id,
           reason: 'pr-replayed-after-manual-change',
@@ -912,6 +1056,16 @@ async function reconcileBoard({
     if (!prRef.retryable) {
       processedPullRequestKeys.add(prKey);
       processedPullRequests.push({
+        key: prKey,
+        pullRequestId: prRef.id,
+        repository,
+        targetRefName: pr.targetRefName || null,
+        sourceRefName: pr.sourceRefName || null,
+        closedDate: pr.closedDate || null,
+        workItemIds: ids,
+      });
+    } else {
+      retryablePullRequests.push({
         key: prKey,
         pullRequestId: prRef.id,
         repository,
@@ -951,7 +1105,7 @@ async function reconcileBoard({
   }
 
   if (stateFile && projectState) {
-    const nextReconcile = nextReconcileState(projectState, processedPullRequests);
+    const nextReconcile = buildNextReconcileState(projectState, processedPullRequests, retryablePullRequests);
     if (reconcileStateChanged(projectState, nextReconcile)) {
       saveProjectState(stateFile, {
         ...projectState,
@@ -1166,6 +1320,11 @@ class HttpAzureDevOpsTransport {
     return this.request(`/_apis/wit/workitems/${id}?fields=System.WorkItemType,System.State,System.Tags,System.Title,System.ChangedDate,Microsoft.VSTS.Common.StateChangeDate&api-version=7.1`);
   }
 
+  async getWorkItemUpdates(_context, id) {
+    const data = await this.request(`/_apis/wit/workitems/${id}/updates?api-version=7.1`);
+    return data.value || [];
+  }
+
   async moveWorkItemState(_context, { id, rev, state, comment }) {
     return this.request(`/_apis/wit/workitems/${id}?api-version=7.1`, {
       method: 'PATCH',
@@ -1278,4 +1437,5 @@ module.exports = {
   parseAzureReposRemote,
   shouldSkipBranchReplay,
   shouldSkipCompletedPrReplay,
+  isOwnStateTransitionUpdate,
 };

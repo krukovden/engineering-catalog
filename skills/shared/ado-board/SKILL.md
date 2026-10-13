@@ -7,11 +7,12 @@ requires:
 
 # Skill: ado-board
 
-This unit owns Azure Boards **state movement** for this catalog. It stores only a
-project-local state map: discovered Azure state names plus a bounded set of processed PR
-markers used to avoid replaying the same completed PR on the same machine. Correctness still
-comes from the repository, the board, and server-side timestamps. Do not call Azure DevOps
-directly from the model prompt; run this unit's Node scripts.
+This unit owns Azure Boards **state movement** for this catalog. It stores only local
+reconcile metadata: discovered Azure state names, a bounded set of processed PR markers, and
+retryable completed PR keys that must stay queryable. Correctness comes from the repository,
+the board, and server-side timestamps plus ado-board's own evidence comments in work item
+history. Do not call Azure DevOps directly from the model prompt; run this unit's Node
+scripts.
 
 ## Before you run it
 
@@ -31,7 +32,7 @@ node "<SKILL_DIR>/scripts/ado-board.js" <command> [flags]
 |---|---|
 | `states discover` | Reads each work item type's states, maps Azure state categories onto `todo / doing / verify / done`, and writes the project-local map file under `.engineering-catalog/ado-board.json`. It records **every** state name per Azure category and then chooses one primary state per bucket for writes, so alternate Proposed/Resolved/Removed states still map correctly on later reads. If a category has two candidate states, the script asks once and records the answer; for unattended runs pass `--non-interactive --choose "Type:bucket=State"` |
 | `move <id> <bucket>` | Moves one work item **forward only** and writes an evidence comment. Use `--comment "..."` when you already have the witness text; otherwise the script names the current branch and SHA. `move` refuses `idp:`-tagged items by default; only the platform runner may opt in with `--allow-idp` when it is moving its own runner-owned card. If Azure DevOps refuses the transition because a field is required, the script stops and returns the field name |
-| `reconcile` | Compares pushed branches plus completed pull requests with the board, repairs forward drift, and reports stale work, untracked pushed branches and missing blueprint links. It never aborts the whole run on one bad item: Removed, closed/backwards, unmapped and missing items are reported as per-item skips, while successful moves stay applied. It never touches `idp:` cards. Completed PR markers are only recorded after non-retryable outcomes, and fresh clones still avoid replaying human reopen/todo changes by checking the work item's server-side state-change timestamp against the branch commit or PR close time. |
+| `reconcile` | Compares pushed branches plus completed pull requests with the board, repairs forward drift, and reports stale work, untracked pushed branches and missing blueprint links. It never aborts the whole run on one bad item: Removed, closed/backwards, unmapped and missing items are reported as per-item skips, while successful moves stay applied. It never touches `idp:` cards. Completed PR markers are recorded only after non-retryable outcomes, retryable PRs stay in a bounded local retry set, and fresh clones still avoid replaying human reopen/todo changes by checking server-side state-change history and ignoring ado-board's own evidence-comment revisions. |
 
 ## Required flags and defaults
 
@@ -40,9 +41,10 @@ node "<SKILL_DIR>/scripts/ado-board.js" <command> [flags]
   `.engineering-catalog/ado-board.json` at the repository root.
 - `move --allow-idp` — explicit opt-in for the platform runner when it must move its own
   `idp:`-tagged card through `move`. Do not use it for ordinary board repair.
-- `.engineering-catalog/ado-board.json` holds only organization/project, discovered states and
-  bounded processed-PR markers; it never stores credentials. Treat it as local machine state
-  and gitignore it unless a repo deliberately wants to share the discovered mapping.
+- `.engineering-catalog/ado-board.json` holds only organization/project, discovered states,
+  bounded processed-PR markers, and bounded retryable PR keys; it never stores credentials.
+  Treat it as local machine state and gitignore it unless a repo deliberately wants to share
+  the discovered mapping.
 - `reconcile --stale-days <n>` — how long a `doing` or `verify` item may sit without a
   pushed commit before it is reported. Default: `7`.
 - `reconcile --allow-unconfigured` — return a skipped result instead of failing when the
