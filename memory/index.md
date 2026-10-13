@@ -2,7 +2,7 @@
      Machine-read fields: `reconciled-sha:` and `store:` lines. Keep it small; unit files win on conflict. -->
 # engineering-catalog — memory index
 
-reconciled-sha: 1fb451476fa11277fd91394b14c7c5d6b9e5fd4c
+reconciled-sha: 24a74548e57964ef9e0baeef18c53c12ace4df04
 store: committed
 
 ## What this project is
