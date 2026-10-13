@@ -1524,6 +1524,328 @@ test('reconcile retries a PR when getWorkItem fails with 500 in the completed-pr
   assert.deepEqual(second.changed.map((entry) => entry.id), ['303']);
 });
 
+test('reconcile keeps the prior completed-PR watermark when the PR list is truncated', async () => {
+  const { repo } = createRepo();
+  git(repo, 'fetch', 'origin');
+  const initialState = {
+    version: 1,
+    organization: 'https://dev.azure.com/example',
+    project: 'Catalog',
+    stateMap: createStateMap(),
+    reconcile: {
+      lastCompletedPrClosedDate: '2026-10-01T00:00:00.000Z',
+      processedPullRequests: [{
+        key: 'engineering-catalog::1::refs/heads/main::2026-10-01T00:00:00.000Z',
+        pullRequestId: '1',
+        repository: 'engineering-catalog',
+        targetRefName: 'refs/heads/main',
+        sourceRefName: 'refs/heads/feature/ADO-1-older',
+        closedDate: '2026-10-01T00:00:00.000Z',
+        workItemIds: ['1'],
+      }],
+    },
+  };
+  const stateFile = createStateFile(repo, initialState);
+  class TruncatedTransport extends FakeTransport {
+    async listCompletedPullRequests(_context, options = {}) {
+      const rows = await super.listCompletedPullRequests(_context, options);
+      rows.truncated = true;
+      return rows;
+    }
+  }
+
+  const transport = new TruncatedTransport({
+    items: {
+      303: {
+        id: 303,
+        rev: 5,
+        fields: {
+          'System.WorkItemType': 'Bug',
+          'System.State': 'Active',
+          'System.Tags': '',
+          'System.Title': 'Truncated PR scan item',
+        },
+      },
+    },
+    prs: [{
+      pullRequestId: 55,
+      sourceRefName: 'refs/heads/bug/ADO-303-newer-window',
+      targetRefName: 'refs/heads/main',
+      creationDate: '2026-10-12T09:00:00.000Z',
+      closedDate: '2026-10-12T13:00:00.000Z',
+      workItemRefs: [{ id: 303 }],
+    }],
+  });
+
+  await reconcileBoard({
+    transport,
+    context: {},
+    stateMap: initialState.stateMap,
+    cwd: repo,
+    staleDays: 30,
+    throttleHours: 0,
+    stateFile,
+    projectState: initialState,
+  });
+
+  const saved = loadProjectState(stateFile);
+  assert.equal(saved.reconcile.lastCompletedPrClosedDate, '2026-10-01T00:00:00.000Z');
+  assert.equal(saved.reconcile.processedPullRequests.length, 2);
+});
+
+test('reconcile retains the first-run lower bound when the completed-PR list is truncated', async () => {
+  const { repo } = createRepo();
+  git(repo, 'fetch', 'origin');
+  const initialState = {
+    version: 1,
+    organization: 'https://dev.azure.com/example',
+    project: 'Catalog',
+    stateMap: createStateMap(),
+  };
+  const stateFile = createStateFile(repo, initialState);
+  class TruncatedTransport extends FakeTransport {
+    async listCompletedPullRequests(_context, options = {}) {
+      const rows = await super.listCompletedPullRequests(_context, options);
+      rows.truncated = true;
+      return rows;
+    }
+  }
+
+  const RealDate = global.Date;
+  const FixedDate = class extends RealDate {
+    constructor(...args) {
+      if (args.length === 0) {
+        super('2026-10-13T12:00:00.000Z');
+        return;
+      }
+      super(...args);
+    }
+    static now() {
+      return new RealDate('2026-10-13T12:00:00.000Z').getTime();
+    }
+  };
+  global.Date = FixedDate;
+  try {
+    const transport = new TruncatedTransport({
+      items: {
+        303: {
+          id: 303,
+          rev: 5,
+          fields: {
+            'System.WorkItemType': 'Bug',
+            'System.State': 'Active',
+            'System.Tags': '',
+            'System.Title': 'Truncated first-run item',
+          },
+        },
+      },
+      prs: [{
+        pullRequestId: 55,
+        sourceRefName: 'refs/heads/bug/ADO-303-first-run-truncated',
+        targetRefName: 'refs/heads/main',
+        creationDate: '2026-10-12T09:00:00.000Z',
+        closedDate: '2026-10-12T13:00:00.000Z',
+        workItemRefs: [{ id: 303 }],
+      }],
+    });
+
+    await reconcileBoard({
+      transport,
+      context: {},
+      stateMap: initialState.stateMap,
+      cwd: repo,
+      staleDays: 30,
+      throttleHours: 0,
+      stateFile,
+      projectState: initialState,
+    });
+    const saved = loadProjectState(stateFile);
+    assert.equal(saved.reconcile.queryMinTime, '2026-09-29T12:00:00.000Z');
+    assert.equal(transport.prQueries[0].minTime, '2026-09-29T12:00:00.000Z');
+  } finally {
+    global.Date = RealDate;
+  }
+});
+
+test('reconcile does not mark a PR processed when fetching its work-item links fails', async () => {
+  const { repo } = createRepo();
+  git(repo, 'fetch', 'origin');
+  const initialState = {
+    version: 1,
+    organization: 'https://dev.azure.com/example',
+    project: 'Catalog',
+    stateMap: createStateMap(),
+  };
+  const stateFile = createStateFile(repo, initialState);
+
+  class LinkFetchFailureTransport extends FakeTransport {
+    async listCompletedPullRequests(_context, options = {}) {
+      const rows = await super.listCompletedPullRequests(_context, options);
+      return rows.map((pr) => ({ ...pr, workItemRefs: [], workItemRefsError: true }));
+    }
+  }
+
+  const transport = new LinkFetchFailureTransport({
+    items: {
+      303: {
+        id: 303,
+        rev: 5,
+        fields: {
+          'System.WorkItemType': 'Bug',
+          'System.State': 'Active',
+          'System.Tags': '',
+          'System.Title': 'Link fetch failure item',
+        },
+      },
+    },
+    prs: [{
+      pullRequestId: 55,
+      sourceRefName: 'refs/heads/bug/ADO-303-link-fetch',
+      targetRefName: 'refs/heads/main',
+      creationDate: '2026-10-12T09:00:00.000Z',
+      closedDate: '2026-10-12T13:00:00.000Z',
+    }],
+  });
+
+  await reconcileBoard({
+    transport,
+    context: {},
+    stateMap: initialState.stateMap,
+    cwd: repo,
+    staleDays: 30,
+    throttleHours: 0,
+    stateFile,
+    projectState: initialState,
+  });
+
+  const saved = loadProjectState(stateFile);
+  assert.equal(saved.reconcile.processedPullRequests.length, 0);
+  assert.equal(saved.reconcile.retryablePullRequests[0].pullRequestId, '55');
+});
+
+test('reconcile exposes the PR id and sanitized cause when the work-item refs fetch fails over HTTP', async () => {
+  const { repo } = createRepo();
+  git(repo, 'remote', 'set-url', 'origin', 'https://dev.azure.com/example/Catalog/_git/engineering-catalog');
+  const initialState = {
+    version: 1,
+    organization: 'https://dev.azure.com/example',
+    project: 'Catalog',
+    stateMap: createStateMap(),
+  };
+  const stateFile = createStateFile(repo, initialState);
+  const { HttpAzureDevOpsTransport } = require('../skills/shared/ado-board/scripts/lib');
+
+  const transport = new HttpAzureDevOpsTransport({
+    context: { organization: 'https://dev.azure.com/example', project: 'Catalog' },
+    authHeader: 'Basic test',
+    fetchImpl: async (url) => {
+      const text = String(url);
+      if (text.includes('/_apis/git/repositories/engineering-catalog/pullrequests')) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({
+            value: [{
+              pullRequestId: 55,
+              sourceRefName: 'refs/heads/bug/ADO-303-http-failure',
+              targetRefName: 'refs/heads/main',
+              closedDate: '2026-10-12T13:00:00.000Z',
+              workItemRefs: [],
+            }],
+          }),
+        };
+      }
+      if (text.includes('/_apis/git/repositories/engineering-catalog/pullRequests/55/workitems')) {
+        return {
+          ok: false,
+          status: 503,
+          text: async () => JSON.stringify({ message: 'The service is temporarily unavailable.' }),
+        };
+      }
+      if (text.includes('/_apis/wit/wiql')) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ workItems: [] }),
+        };
+      }
+      throw new Error(`unexpected url ${text}`);
+    },
+  });
+
+  const result = await reconcileBoard({
+    transport,
+    context: { organization: 'https://dev.azure.com/example', project: 'Catalog' },
+    stateMap: initialState.stateMap,
+    cwd: repo,
+    staleDays: 30,
+    throttleHours: 0,
+    stateFile,
+    projectState: initialState,
+  });
+
+  assert.equal(result.skipped[0].reason, 'work-item-links-error');
+  assert.equal(result.skipped[0].id, '55');
+  assert.match(result.skipped[0].message, /503|temporarily unavailable/i);
+  assert.equal(result.report.warnings.find((warning) => warning.code === 'pr-work-item-links-error').pullRequestId, '55');
+  const saved = loadProjectState(stateFile);
+  assert.equal(saved.reconcile.retryablePullRequests[0].pullRequestId, '55');
+});
+
+test('listTrackedItemsInBuckets splits large item lists into 200-id batches', async () => {
+  const batches = [];
+  const transport = new (require('../skills/shared/ado-board/scripts/lib').HttpAzureDevOpsTransport)({
+    context: { organization: 'https://dev.azure.com/example', project: 'Catalog' },
+    authHeader: 'Basic test',
+    fetchImpl: async (url, options) => {
+      if (String(url).includes('/_apis/wit/wiql')) {
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            workItems: Array.from({ length: 201 }, (_, index) => ({ id: index + 1 })),
+          }),
+        };
+      }
+      if (String(url).includes('/_apis/wit/workitemsbatch')) {
+        const body = JSON.parse(options.body);
+        batches.push(body.ids);
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            value: body.ids.map((id) => ({
+              id,
+              fields: {
+                'System.WorkItemType': 'Task',
+                'System.State': 'Active',
+                'System.Tags': '',
+                'System.Title': `Item ${id}`,
+              },
+            })),
+          }),
+        };
+      }
+      throw new Error(`unexpected url ${url}`);
+    },
+  });
+
+  const stateMap = {
+    Task: {
+      doing: 'Active',
+      verify: 'Resolved',
+      done: 'Closed',
+      categories: {
+        InProgress: ['Active'],
+        Resolved: ['Resolved'],
+        Completed: ['Closed'],
+      },
+    },
+  };
+
+  const result = await transport.listTrackedItemsInBuckets({}, stateMap, ['doing', 'verify']);
+  assert.equal(result.length, 201);
+  assert.deepEqual(batches.map((batch) => batch.length), [200, 1]);
+});
+
 test('reconcile does not rewrite the state file when no reconcile markers change', async () => {
   const { repo } = createRepo();
   git(repo, 'fetch', 'origin');
@@ -1818,4 +2140,18 @@ test('L-m a PR returned on two pages is handled once and strands no retry entry'
   const saved = loadProjectState(stateFile);
   assert.deepEqual(saved.reconcile.retryablePullRequests.map((e) => e.pullRequestId), ['10']);
   assert.equal(saved.reconcile.processedPullRequests.length, 0);
+});
+
+test('a saved first-run floor is reused as an ISO string and is not raised to a retryable PR date', () => {
+  const { reconcileQueryMinTime } = require('../skills/shared/ado-board/scripts/lib');
+  const later = new Date('2026-10-14T12:00:00Z');
+  const state = { reconcile: {
+    queryMinTime: '2026-09-29T12:00:00.000Z',
+    retryablePullRequests: [{ id: 300, repositoryId: 'r', closedDate: '2026-10-12T13:00:00.000Z' }],
+  } };
+  const min = reconcileQueryMinTime(state, { now: later });
+  assert.equal(typeof min, 'string');
+  assert.equal(min, '2026-09-29T12:00:00.000Z');
+  assert.equal(new URLSearchParams({ 'searchCriteria.minTime': min }).toString(),
+    'searchCriteria.minTime=2026-09-29T12%3A00%3A00.000Z');
 });

@@ -1,7 +1,7 @@
 {
   "name": "engineering-catalog",
   "description": "AI engineering catalog — skills, agents, workflows and bundles for GitHub Copilot and Claude Code",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "source": "https://github.com/krukovden/engineering-catalog",
   "skills": [
     {
@@ -14,7 +14,7 @@
         "ado-credentials"
       ],
       "path": "skills/shared/ado-board",
-      "version": "2cefb33335f2"
+      "version": "187e94e246d3"
     },
     {
       "name": "ado-credentials",

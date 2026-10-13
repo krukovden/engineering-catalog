@@ -773,13 +773,29 @@ function retryableMinClosedDate(entries = []) {
   return valid[0] ? valid[0].toISOString() : null;
 }
 
+function sanitizeErrorCause(error) {
+  const raw = error && typeof error === 'object'
+    ? (error.message || error.data?.message || String(error))
+    : String(error || '');
+  const cleaned = raw
+    .replace(/https?:\/\/[^\s]+/g, '<redacted>')
+    .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '<redacted>')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned && cleaned.length > 180 ? `${cleaned.slice(0, 177)}...` : (cleaned || 'unknown error');
+}
+
 function reconcileQueryMinTime(projectState, { now = new Date(), firstRunDays = DEFAULT_FIRST_RUN_DAYS } = {}) {
   const current = projectState?.reconcile || {};
   const retryMin = retryableMinClosedDate(current.retryablePullRequests || []);
+  const savedMin = parseIsoDate(current.queryMinTime);
   if (!current.lastCompletedPrClosedDate) {
-    // No watermark yet: never walk the whole history, only PRs closed inside the floor window.
+    // A saved floor belongs to a scan that has not finished: keep querying from it,
+    // as an ISO string, and never raise it to a retryable PR's later date.
+    if (savedMin) return savedMin.toISOString();
     const floor = new Date(now.getTime() - firstRunDays * 86400000).toISOString();
-    return retryMin && retryMin > floor ? retryMin : floor;
+    if (retryMin && retryMin > floor) return retryMin;
+    return floor;
   }
   if (!retryMin) return current.lastCompletedPrClosedDate;
   return new Date(retryMin) < new Date(current.lastCompletedPrClosedDate)
@@ -804,15 +820,21 @@ function contiguousSuccessClosedDate(processedPullRequests, retryablePullRequest
   return eligible[0] ? eligible[0].toISOString() : null;
 }
 
-function buildNextReconcileState(projectState, processedPullRequests, retryablePullRequests) {
+function buildNextReconcileState(projectState, processedPullRequests, retryablePullRequests, { truncated = false, queryMinTime = null } = {}) {
   const current = projectState?.reconcile || {};
   const nextProcessed = nextReconcileState(projectState, processedPullRequests).processedPullRequests;
   const nextRetryable = updateRetryablePullRequests(current.retryablePullRequests || [], retryablePullRequests, nextProcessed);
   const contiguousClosedDate = contiguousSuccessClosedDate(nextProcessed, nextRetryable);
+  const nextQueryMinTime = truncated
+    ? (queryMinTime || current.queryMinTime || null)
+    : (current.lastCompletedPrClosedDate ? null : (current.queryMinTime || null));
   return {
-    lastCompletedPrClosedDate: contiguousClosedDate || current.lastCompletedPrClosedDate || null,
+    lastCompletedPrClosedDate: truncated
+      ? current.lastCompletedPrClosedDate || null
+      : contiguousClosedDate || current.lastCompletedPrClosedDate || null,
     processedPullRequests: nextProcessed,
     ...(nextRetryable.length ? { retryablePullRequests: nextRetryable } : {}),
+    queryMinTime: nextQueryMinTime,
   };
 }
 
@@ -820,10 +842,12 @@ function reconcileStateChanged(projectState, nextReconcile) {
   const current = projectState?.reconcile || {};
   return JSON.stringify({
     lastCompletedPrClosedDate: current.lastCompletedPrClosedDate || null,
+    queryMinTime: current.queryMinTime || null,
     processedPullRequests: current.processedPullRequests || [],
     retryablePullRequests: current.retryablePullRequests || [],
   }) !== JSON.stringify({
     lastCompletedPrClosedDate: nextReconcile.lastCompletedPrClosedDate || null,
+    queryMinTime: nextReconcile.queryMinTime || null,
     processedPullRequests: nextReconcile.processedPullRequests || [],
     retryablePullRequests: nextReconcile.retryablePullRequests || [],
   });
@@ -874,6 +898,7 @@ async function reconcileBoard({
   const skipped = [];
   const processedPullRequests = [];
   const retryablePullRequests = [];
+  const warnings = [];
   const processedPullRequestKeys = new Set(
     (projectState?.reconcile?.processedPullRequests || []).map((entry) => entry.key),
   );
@@ -1053,7 +1078,6 @@ async function reconcileBoard({
   for (const pr of prs) {
     const prKey = completedPullRequestKey(repository, pr);
     if (processedPullRequestKeys.has(prKey)) continue;
-    const ids = parsePullRequestWorkItem(pr);
     const prRef = {
       id: String(pr.pullRequestId || pr.id || ''),
       key: prKey,
@@ -1061,6 +1085,35 @@ async function reconcileBoard({
       sourceRefName: pr.sourceRefName || null,
       targetRefName: pr.targetRefName || null,
     };
+    if (pr.workItemRefsError) {
+      prRef.retryable = true;
+      const status = pr.workItemRefsError?.status ? String(pr.workItemRefsError.status) : 'unknown';
+      const cause = sanitizeErrorCause(pr.workItemRefsError?.message || pr.workItemRefsError || 'work-item refs fetch failed');
+      const message = `PR ${prRef.id} could not fetch linked work items (${status}): ${cause}`;
+      warnings.push({
+        code: 'pr-work-item-links-error',
+        pullRequestId: prRef.id,
+        message,
+      });
+      pushSkipped({
+        id: prRef.id,
+        reason: 'work-item-links-error',
+        source: 'completed-pr',
+        message,
+        pullRequest: prRef,
+      });
+      retryablePullRequests.push({
+        key: prKey,
+        pullRequestId: prRef.id,
+        repository,
+        targetRefName: pr.targetRefName || null,
+        sourceRefName: pr.sourceRefName || null,
+        closedDate: pr.closedDate || null,
+        workItemIds: parsePullRequestWorkItem(pr),
+      });
+      continue;
+    }
+    const ids = parsePullRequestWorkItem(pr);
     for (const id of ids) {
       let item;
       try {
@@ -1156,7 +1209,10 @@ async function reconcileBoard({
   }
 
   if (stateFile && projectState) {
-    const nextReconcile = buildNextReconcileState(projectState, processedPullRequests, retryablePullRequests);
+    const nextReconcile = buildNextReconcileState(projectState, processedPullRequests, retryablePullRequests, {
+      truncated: Boolean(prListTruncated),
+      queryMinTime: prQuery.minTime,
+    });
     if (reconcileStateChanged(projectState, nextReconcile)) {
       saveProjectState(stateFile, {
         ...projectState,
@@ -1180,6 +1236,7 @@ async function reconcileBoard({
         .map((entry) => ({ branch: entry.name, sha: entry.sha, committedAt: entry.committedAt })),
       blueprintDrift: blueprintDrift(root),
       warnings: [
+        ...warnings,
         ...(prListTruncated ? [{ code: 'pr-list-truncated', message: `Completed PR list hit the ${maxPrPages}-page budget; older PRs in the window were not examined. Re-run on demand with --max-pr-pages <n> to go further.` }] : []),
         ...(branchScan.baseMissing ? [{ code: 'base-not-found', message: 'Could not resolve origin/HEAD, main, or master for ahead-of-base comparisons.' }] : []),
       ],
@@ -1318,6 +1375,7 @@ function getAzToken() {
 const PAGE_LIMIT = 50;
 const PR_PAGE_SIZE = 100;
 const UPDATES_PAGE_SIZE = 200;
+const WORKITEMS_BATCH_LIMIT = 200;
 
 class HttpError extends Error {
   constructor(status, message, data) {
@@ -1422,15 +1480,20 @@ class HttpAzureDevOpsTransport {
     const enriched = [];
     for (const pr of pulls) {
       let workItemRefs = pr.workItemRefs;
-      if (!Array.isArray(workItemRefs)) {
+      let workItemRefsError = null;
+      if (!Array.isArray(workItemRefs) || workItemRefs.length === 0) {
         try {
           const workItems = await this.request(`/_apis/git/repositories/${encodeURIComponent(repository)}/pullRequests/${pr.pullRequestId}/workitems?api-version=7.1`);
           workItemRefs = workItems.value || [];
-        } catch {
+        } catch (error) {
           workItemRefs = [];
+          workItemRefsError = {
+            status: error?.status || null,
+            message: sanitizeErrorCause(error),
+          };
         }
       }
-      enriched.push({ ...pr, workItemRefs });
+      enriched.push({ ...pr, workItemRefs, ...(workItemRefsError ? { workItemRefsError } : {}) });
     }
     if (truncated) enriched.truncated = true;
     return enriched;
@@ -1453,15 +1516,20 @@ class HttpAzureDevOpsTransport {
     });
     const ids = (query.workItems || []).map((item) => item.id);
     if (!ids.length) return [];
-    const batch = await this.request('/_apis/wit/workitemsbatch?api-version=7.1', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ids,
-        fields: ['System.WorkItemType', 'System.State', 'System.Tags', 'System.Title'],
-      }),
-    });
-    return batch.value || [];
+    const items = [];
+    for (let offset = 0; offset < ids.length; offset += WORKITEMS_BATCH_LIMIT) {
+      const batch = ids.slice(offset, offset + WORKITEMS_BATCH_LIMIT);
+      const page = await this.request('/_apis/wit/workitemsbatch?api-version=7.1', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ids: batch,
+          fields: ['System.WorkItemType', 'System.State', 'System.Tags', 'System.Title'],
+        }),
+      });
+      items.push(...(page.value || []));
+    }
+    return items;
   }
 }
 
