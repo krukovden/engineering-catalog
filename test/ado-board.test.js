@@ -46,6 +46,25 @@ function httpError(status, message) {
   return error;
 }
 
+// Real /updates semantics: fields carry the change time (System.ChangedDate.newValue);
+// revisedDate is when the revision was superseded — the next revision's change time,
+// 9999-01-01 for the latest one. Fixtures may seed `revisedDate` as the change time; it is
+// converted to a ChangedDate field here so tests never lean on the wrong meaning.
+function realShapedUpdates(list) {
+  const out = list.map((update) => {
+    const copy = structuredClone(update);
+    copy.fields = copy.fields || {};
+    if (!copy.fields['System.ChangedDate']) copy.fields['System.ChangedDate'] = { newValue: copy.revisedDate };
+    return copy;
+  });
+  out.forEach((update, index) => {
+    update.revisedDate = index + 1 < out.length
+      ? out[index + 1].fields['System.ChangedDate'].newValue
+      : '9999-01-01T00:00:00Z';
+  });
+  return out;
+}
+
 class FakeTransport {
   constructor({
     items = {},
@@ -62,7 +81,7 @@ class FakeTransport {
     moveTimestamp = '2026-10-12T15:00:00.000Z',
   } = {}) {
     this.items = new Map(Object.entries(items).map(([id, item]) => [String(id), structuredClone(item)]));
-    this.updates = new Map(Object.entries(updates).map(([id, itemUpdates]) => [String(id), structuredClone(itemUpdates)]));
+    this.updates = new Map(Object.entries(updates).map(([id, itemUpdates]) => [String(id), realShapedUpdates(itemUpdates)]));
     this.prs = structuredClone(prs);
     this.activeIds = activeIds.map(String);
     this.types = types;
@@ -116,11 +135,12 @@ class FakeTransport {
       revisedDate,
       revisedBy: { displayName: 'ado-board reconcile' },
       fields: {
+        'System.ChangedDate': { newValue: revisedDate },
         'System.State': { newValue: state },
         'System.History': { newValue: comment },
       },
     });
-    this.updates.set(key, itemUpdates);
+    this.updates.set(key, realShapedUpdates(itemUpdates));
     this.moves.push({ id: key, state, comment });
     return structuredClone(item);
   }
@@ -1539,4 +1559,189 @@ test('reconcile does not rewrite the state file when no reconcile markers change
   });
 
   assert.equal(fs.readFileSync(stateFile, 'utf8'), before);
+});
+
+function prItem(id, extra = {}) {
+  return {
+    id,
+    rev: 2,
+    fields: {
+      'System.WorkItemType': 'Product Backlog Item',
+      'System.State': 'Committed',
+      'System.Tags': '',
+      'System.Title': `Item ${id}`,
+      'Microsoft.VSTS.Common.StateChangeDate': '2026-10-12T15:00:00.000Z',
+      'System.ChangedDate': '2026-10-12T15:00:00.000Z',
+      ...extra,
+    },
+  };
+}
+
+function closedPr(pullRequestId, workItemId, closedDate = '2026-10-12T14:00:00.000Z') {
+  return {
+    pullRequestId,
+    sourceRefName: `refs/heads/feature/ADO-${workItemId}-x`,
+    targetRefName: 'refs/heads/main',
+    creationDate: '2026-10-12T13:00:00.000Z',
+    closedDate,
+    workItemRefs: [{ id: workItemId }],
+  };
+}
+
+const reconcileArgs = (repo, transport, extra = {}) => ({
+  transport,
+  context: {},
+  stateMap: createStateMap(),
+  cwd: repo,
+  staleDays: 30,
+  throttleHours: 0,
+  ...extra,
+});
+
+test('RX1 real-shaped updates: a human creation revision superseded by an own move is not a manual change after the PR closed', async () => {
+  const { repo } = createRepo();
+  git(repo, 'fetch', 'origin');
+  const transport = new FakeTransport({
+    items: { 5: prItem(5) },
+    updates: {
+      5: [
+        { revisedBy: { displayName: 'Product Owner' }, revisedDate: '2026-10-01T09:00:00.000Z', fields: { 'System.State': { newValue: 'New' } } },
+        {
+          revisedBy: { displayName: 'ado-board reconcile' },
+          revisedDate: '2026-10-12T15:00:00.000Z',
+          fields: {
+            'System.State': { newValue: 'Committed' },
+            'System.History': { newValue: 'ado-board: moved to doing after pushed work on feature/ADO-5-x (1234567).' },
+          },
+        },
+      ],
+    },
+    prs: [closedPr(10, 5)],
+  });
+  // the fake must emit the real shape: rev 1 is superseded at the own move, the last rev is 9999
+  const served = await transport.getWorkItemUpdates({}, 5);
+  assert.equal(served[0].revisedDate, '2026-10-12T15:00:00.000Z');
+  assert.equal(served[1].revisedDate, '9999-01-01T00:00:00Z');
+
+  const result = await reconcileBoard(reconcileArgs(repo, transport));
+  assert.deepEqual(result.skipped, []);
+  assert.deepEqual(result.changed.map((entry) => ({ id: entry.id, to: entry.to })), [{ id: '5', to: 'done' }]);
+});
+
+test('RX1b a genuine human state change after the PR closed still blocks the replay under real-shaped updates', async () => {
+  const { repo } = createRepo();
+  git(repo, 'fetch', 'origin');
+  const transport = new FakeTransport({
+    items: { 5: prItem(5) },
+    updates: {
+      5: [
+        { revisedDate: '2026-10-01T09:00:00.000Z', fields: { 'System.State': { newValue: 'New' } } },
+        { revisedDate: '2026-10-12T15:00:00.000Z', revisedBy: { displayName: 'QA' }, fields: { 'System.State': { newValue: 'Committed' }, 'System.History': { newValue: 'reopened' } } },
+      ],
+    },
+    prs: [closedPr(10, 5)],
+  });
+  const result = await reconcileBoard(reconcileArgs(repo, transport));
+  assert.deepEqual(result.changed, []);
+  assert.equal(result.skipped[0].reason, 'pr-replayed-after-manual-change');
+});
+
+test('RX2 a failing /updates call on a PR item is a retryable move-error, not an exception', async () => {
+  const { repo } = createRepo();
+  git(repo, 'fetch', 'origin');
+  const initialState = { version: 1, organization: 'https://dev.azure.com/example', project: 'Catalog', stateMap: createStateMap() };
+  const stateFile = createStateFile(repo, initialState);
+  const transport = new FakeTransport({
+    items: { 5: prItem(5), 6: prItem(6, { 'Microsoft.VSTS.Common.StateChangeDate': '2026-10-01T00:00:00.000Z', 'System.ChangedDate': '2026-10-01T00:00:00.000Z' }) },
+    getUpdatesErrors: { 5: httpError(500, 'boom') },
+    prs: [closedPr(10, 5), closedPr(11, 6, '2026-10-12T14:30:00.000Z')],
+  });
+  const result = await reconcileBoard(reconcileArgs(repo, transport, { stateFile, projectState: initialState }));
+  assert.deepEqual(result.skipped.map((entry) => [entry.id, entry.reason]), [['5', 'move-error']]);
+  assert.deepEqual(result.changed.map((entry) => entry.id), ['6']);
+  assert.equal(transport.items.get('6').fields['System.State'], 'Done');
+  const saved = loadProjectState(stateFile);
+  assert.deepEqual(saved.reconcile.retryablePullRequests.map((entry) => entry.pullRequestId), ['10']);
+});
+
+test('RX2b a failing /updates call on a branch item is a move-error, not an exception', async () => {
+  const { repo } = createRepo();
+  createPushedBranch(repo, 'feature/ADO-5-catalog-sync', 'a.txt', 'a');
+  createPushedBranch(repo, 'feature/ADO-6-other', 'b.txt', 'b');
+  git(repo, 'fetch', 'origin');
+  const transport = new FakeTransport({
+    items: {
+      5: prItem(5, { 'System.State': 'New', 'Microsoft.VSTS.Common.StateChangeDate': '2099-01-01T00:00:00.000Z', 'System.ChangedDate': '2099-01-01T00:00:00.000Z' }),
+      6: prItem(6, { 'System.State': 'New', 'Microsoft.VSTS.Common.StateChangeDate': '2026-01-01T00:00:00.000Z', 'System.ChangedDate': '2026-01-01T00:00:00.000Z' }),
+    },
+    getUpdatesErrors: { 5: httpError(503, 'unavailable') },
+  });
+  const result = await reconcileBoard(reconcileArgs(repo, transport));
+  assert.deepEqual(result.skipped.map((entry) => [entry.id, entry.reason, entry.source]), [['5', 'move-error', 'branch-pushed']]);
+  assert.deepEqual(result.changed.map((entry) => entry.id), ['6']);
+});
+
+test('L-i a permanent required-field failure is a terminal per-item report and does not pin minTime', async () => {
+  const { repo } = createRepo();
+  git(repo, 'fetch', 'origin');
+  const initialState = { version: 1, organization: 'https://dev.azure.com/example', project: 'Catalog', stateMap: createStateMap() };
+  const stateFile = createStateFile(repo, initialState);
+  const transport = new FakeTransport({
+    items: { 5: prItem(5, { 'Microsoft.VSTS.Common.StateChangeDate': '2026-10-01T00:00:00.000Z', 'System.ChangedDate': '2026-10-01T00:00:00.000Z' }) },
+    failMoveById: { 5: new Error('TF401320: Rule Error for field Remaining Work. Error code: Required, InvalidEmpty.') },
+    prs: [closedPr(10, 5)],
+  });
+  const result = await reconcileBoard(reconcileArgs(repo, transport, { stateFile, projectState: initialState }));
+  assert.equal(result.skipped[0].reason, 'required-field');
+  const saved = loadProjectState(stateFile);
+  assert.equal(saved.reconcile.retryablePullRequests, undefined);
+  assert.deepEqual(saved.reconcile.processedPullRequests.map((entry) => entry.pullRequestId), ['10']);
+  assert.equal(saved.reconcile.lastCompletedPrClosedDate, '2026-10-12T14:00:00.000Z');
+});
+
+test('L-j the HTTP transport pages /updates and completed pull requests', async () => {
+  const { HttpAzureDevOpsTransport } = require('../skills/shared/ado-board/scripts/lib');
+  const urls = [];
+  const fetchImpl = async (url) => {
+    urls.push(url);
+    const parsed = new URL(url);
+    const top = Number(parsed.searchParams.get('$top'));
+    const skip = Number(parsed.searchParams.get('$skip') || 0);
+    const total = parsed.pathname.includes('/updates') ? 250 : 130;
+    const value = Array.from({ length: Math.max(0, Math.min(top, total - skip)) }, (_, i) => (
+      parsed.pathname.includes('/updates') ? { id: skip + i } : { pullRequestId: skip + i, workItemRefs: [] }
+    ));
+    return { ok: true, status: 200, text: async () => JSON.stringify({ value }) };
+  };
+  const transport = new HttpAzureDevOpsTransport({
+    context: { organization: 'https://dev.azure.com/example', project: 'Catalog' },
+    authHeader: 'Basic x',
+    fetchImpl,
+  });
+  const updates = await transport.getWorkItemUpdates({}, 5);
+  assert.equal(updates.length, 250);
+  assert.equal(new Set(updates.map((u) => u.id)).size, 250);
+  const prs = await transport.listCompletedPullRequests({}, { repository: 'repo' });
+  assert.equal(prs.length, 130);
+  assert.equal(new Set(prs.map((p) => p.pullRequestId)).size, 130);
+});
+
+test('L-k a revisedBy named ado-board without the marker is not an own transition', () => {
+  const { isOwnStateTransitionUpdate } = require('../skills/shared/ado-board/scripts/lib');
+  assert.equal(isOwnStateTransitionUpdate({
+    revisedBy: { displayName: 'ado-board reconcile' },
+    fields: { 'System.State': { newValue: 'Done' }, 'System.History': { newValue: 'plain human note' } },
+  }), false);
+});
+
+test('L-l parseAzureReposRemote accepts explicit ssh ports and project-less legacy visualstudio URLs', () => {
+  assert.deepEqual(parseAzureReposRemote('ssh://git@ssh.dev.azure.com:22/v3/HAL-TSS/TSS-Orion/Repo'), {
+    organization: 'https://dev.azure.com/HAL-TSS', organizationId: 'HAL-TSS', project: 'TSS-Orion', repository: 'Repo',
+  });
+  assert.deepEqual(parseAzureReposRemote('ssh://hal@vs-ssh.visualstudio.com:22/v3/hal/Catalog/Repo'), {
+    organization: 'https://hal.visualstudio.com', organizationId: 'hal', project: 'Catalog', repository: 'Repo',
+  });
+  assert.deepEqual(parseAzureReposRemote('https://hal.visualstudio.com/DefaultCollection/_git/Repo'), {
+    organization: 'https://hal.visualstudio.com', organizationId: 'hal', project: 'Repo', repository: 'Repo',
+  });
 });

@@ -260,6 +260,18 @@ function parseAzureReposRemote(remoteUrl) {
     };
   }
 
+  match = /^https:\/\/(?:[^@/]+@)?([^./]+)\.visualstudio\.com\/(?:DefaultCollection\/)?_git\/([^/?#]+)(?:[/?#]|$)/i.exec(text);
+  if (match) {
+    const organizationId = decodeURIComponent(match[1]);
+    const repository = decodeURIComponent(match[2]);
+    return {
+      organization: normalizeOrganization(`https://${organizationId}.visualstudio.com`),
+      organizationId,
+      project: repository,
+      repository,
+    };
+  }
+
   match = /^https:\/\/(?:[^@/]+@)?([^./]+)\.visualstudio\.com\/(?:DefaultCollection\/)?([^/]+)\/_git\/([^/?#]+)(?:[/?#]|$)/i.exec(text);
   if (match) {
     const organizationId = decodeURIComponent(match[1]);
@@ -271,7 +283,7 @@ function parseAzureReposRemote(remoteUrl) {
     };
   }
 
-  match = /^(?:ssh:\/\/)?git@ssh\.dev\.azure\.com[:/]v3\/([^/]+)\/([^/]+)\/([^/?#]+)(?:[/?#]|$)/i.exec(text);
+  match = /^(?:ssh:\/\/)?git@ssh\.dev\.azure\.com(?::\d+)?[:/]v3\/([^/]+)\/([^/]+)\/([^/?#]+)(?:[/?#]|$)/i.exec(text);
   if (match) {
     const organizationId = decodeURIComponent(match[1]);
     return {
@@ -282,7 +294,7 @@ function parseAzureReposRemote(remoteUrl) {
     };
   }
 
-  match = /^(?:ssh:\/\/)?[^@]+@vs-ssh\.visualstudio\.com[:/]v3\/([^/]+)\/([^/]+)\/([^/?#]+)(?:[/?#]|$)/i.exec(text);
+  match = /^(?:ssh:\/\/)?[^@]+@vs-ssh\.visualstudio\.com(?::\d+)?[:/]v3\/([^/]+)\/([^/]+)\/([^/?#]+)(?:[/?#]|$)/i.exec(text);
   if (match) {
     const organizationId = decodeURIComponent(match[1]);
     return {
@@ -588,17 +600,17 @@ function isOwnStateTransitionUpdate(update) {
   if (isOwnMarkerComment(history)) return true;
   const comment = fieldValue(extractUpdateField(update, 'System.Comment'));
   if (isOwnMarkerComment(comment)) return true;
-  const revisedBy = update?.revisedBy?.displayName || update?.revisedBy?.uniqueName || update?.revisedBy?.name || '';
-  return /ado-board/i.test(String(revisedBy)) && (isOwnMarkerComment(history) || isOwnMarkerComment(comment));
+  return false;
 }
 
+// Never read update.revisedDate: it is when the revision was superseded (9999-01-01 for the latest).
 function latestNonOwnStateChangeDateFromUpdates(updates = []) {
   const candidates = [];
   for (const update of updates) {
     if (isOwnStateTransitionUpdate(update)) continue;
     const stateField = extractUpdateField(update, 'System.State');
     if (!stateField) continue;
-    const when = parseIsoDate(update?.revisedDate || fieldValue(extractUpdateField(update, 'System.ChangedDate')) || fieldValue(extractUpdateField(update, 'Microsoft.VSTS.Common.StateChangeDate')));
+    const when = parseIsoDate(fieldValue(extractUpdateField(update, 'System.ChangedDate')) || fieldValue(extractUpdateField(update, 'Microsoft.VSTS.Common.StateChangeDate')));
     if (when) candidates.push(when);
   }
   candidates.sort((a, b) => b.getTime() - a.getTime());
@@ -687,7 +699,7 @@ function skippableReconcileError(error) {
 }
 
 function isRetryablePrSkip(reason) {
-  return reason === 'move-error' || reason === 'required-field';
+  return reason === 'move-error';
 }
 
 function completedPullRequestKey(repository, pr) {
@@ -980,7 +992,16 @@ async function reconcileBoard({
     const typeMap = stateMap[item.fields['System.WorkItemType']];
     const bucket = inferBucketForState(typeMap, item.fields['System.State']);
     if (bucket === 'todo') {
-      if (shouldSkipBranchReplay(item, branch) && await wasChangedBySomeoneElseAfter(id, parseIsoDate(branch.committedAt))) {
+      let replayed = false;
+      if (shouldSkipBranchReplay(item, branch)) {
+        try {
+          replayed = await wasChangedBySomeoneElseAfter(id, parseIsoDate(branch.committedAt));
+        } catch (error) {
+          pushSkipped({ id, reason: 'move-error', source: 'branch-pushed', message: String(error.message || error), branch: branch.name });
+          continue;
+        }
+      }
+      if (replayed) {
         pushSkipped({
           id,
           reason: 'branch-replayed-after-manual-change',
@@ -1032,7 +1053,17 @@ async function reconcileBoard({
       }
       const typeMap = stateMap[item.fields['System.WorkItemType']];
       const targetBucket = item.fields['System.WorkItemType'] === 'Bug' ? 'verify' : 'done';
-      if (shouldSkipCompletedPrReplay(item, pr) && await wasChangedBySomeoneElseAfter(id, parseIsoDate(pr.closedDate))) {
+      let replayed = false;
+      if (shouldSkipCompletedPrReplay(item, pr)) {
+        try {
+          replayed = await wasChangedBySomeoneElseAfter(id, parseIsoDate(pr.closedDate));
+        } catch (error) {
+          pushSkipped({ id, reason: 'move-error', source: 'completed-pr', message: String(error.message || error), pullRequest: prRef });
+          prRef.retryable = true;
+          continue;
+        }
+      }
+      if (replayed) {
         pushSkipped({
           id,
           reason: 'pr-replayed-after-manual-change',
@@ -1263,6 +1294,10 @@ function getAzToken() {
   return parsed.accessToken;
 }
 
+const PAGE_LIMIT = 50;
+const PR_PAGE_SIZE = 100;
+const UPDATES_PAGE_SIZE = 200;
+
 class HttpError extends Error {
   constructor(status, message, data) {
     super(message);
@@ -1321,8 +1356,14 @@ class HttpAzureDevOpsTransport {
   }
 
   async getWorkItemUpdates(_context, id) {
-    const data = await this.request(`/_apis/wit/workitems/${id}/updates?api-version=7.1`);
-    return data.value || [];
+    const updates = [];
+    for (let skip = 0; skip < PAGE_LIMIT * UPDATES_PAGE_SIZE; skip += UPDATES_PAGE_SIZE) {
+      const data = await this.request(`/_apis/wit/workitems/${id}/updates?%24top=${UPDATES_PAGE_SIZE}&%24skip=${skip}&api-version=7.1`);
+      const page = data?.value || [];
+      updates.push(...page);
+      if (page.length < UPDATES_PAGE_SIZE) break;
+    }
+    return updates;
   }
 
   async moveWorkItemState(_context, { id, rev, state, comment }) {
@@ -1339,16 +1380,22 @@ class HttpAzureDevOpsTransport {
 
   async listCompletedPullRequests(_context, { repository, targetRefName = null, minTime = null, queryTimeRangeType = null } = {}) {
     if (!repository) return [];
-    const params = new URLSearchParams({
-      'searchCriteria.status': 'completed',
-      '$top': '100',
-      'api-version': '7.1',
-    });
-    if (targetRefName) params.set('searchCriteria.targetRefName', targetRefName);
-    if (minTime) params.set('searchCriteria.minTime', minTime);
-    if (queryTimeRangeType) params.set('searchCriteria.queryTimeRangeType', queryTimeRangeType);
-    const data = await this.request(`/_apis/git/repositories/${encodeURIComponent(repository)}/pullrequests?${params.toString()}`);
-    const pulls = data.value || [];
+    const pulls = [];
+    for (let skip = 0; skip < PAGE_LIMIT * PR_PAGE_SIZE; skip += PR_PAGE_SIZE) {
+      const params = new URLSearchParams({
+        'searchCriteria.status': 'completed',
+        '$top': String(PR_PAGE_SIZE),
+        '$skip': String(skip),
+        'api-version': '7.1',
+      });
+      if (targetRefName) params.set('searchCriteria.targetRefName', targetRefName);
+      if (minTime) params.set('searchCriteria.minTime', minTime);
+      if (queryTimeRangeType) params.set('searchCriteria.queryTimeRangeType', queryTimeRangeType);
+      const data = await this.request(`/_apis/git/repositories/${encodeURIComponent(repository)}/pullrequests?${params.toString()}`);
+      const page = data?.value || [];
+      pulls.push(...page);
+      if (page.length < PR_PAGE_SIZE) break;
+    }
     const enriched = [];
     for (const pr of pulls) {
       let workItemRefs = pr.workItemRefs;
@@ -1427,6 +1474,7 @@ module.exports = {
   reconcileBoard,
   resolveAdoContext,
   createTransport,
+  HttpAzureDevOpsTransport,
   manualEvidenceComment,
   repoRoot,
   parseRepositoryName,
