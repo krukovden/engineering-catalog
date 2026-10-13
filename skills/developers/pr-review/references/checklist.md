@@ -1,152 +1,145 @@
 # Review checklist
 
-Apply the rules in this order. Correctness comes first because a beautifully
-structured change that returns the wrong answer is still wrong; style comes last
-because it never blocks a merge on its own. Each rule says how to recognise a
-violation and what severity it carries by default — calibrate with rule 10.
+Apply the rules in this order. Load repository-specific rules first as
+`references/rules.md` defines, then apply this shared rubric. Correctness comes
+first because a beautifully structured change that returns the wrong answer is
+still wrong.
 
-Every finding is `file:line — what — why — how to fix`. "Why" means the input,
-state or sequence that makes it fail, or the concrete rule it breaks. A finding
-without one is an opinion; leave it out or put it under Unverified.
+Every finding is `file:line — what — why — how to fix`. "Why" means the exact
+input, state, sequence, or concrete rule that makes it fail. No trigger and no
+broken rule means no finding.
 
-## 1. Correctness first
+## 1. Severity
 
-Bugs, races, error handling, boundaries.
+Use these buckets exactly:
 
-- **Recognise:** an off-by-one at a boundary; a null or empty input the code never
-  considered; an error caught and swallowed, or a failure path that leaves state
-  half-written; two writers to one resource with nothing serialising them; a retry
-  without a cap; a result that is right for the happy path and wrong for the one
-  the tests skip.
-- **Say:** the file:line and the exact input or state that breaks it. "This could
-  fail" is not a finding; "an empty list reaches line 42 and `items[0]` throws" is.
-- **Severity:** wrong result or data loss → Critical; wrong behaviour on a real
-  input → Important; a theoretical edge nobody can reach → Minor.
+| Severity | Meaning | Criteria |
+|---|---|---|
+| **CRITICAL** | Must fix before merge | Wrong result, security hole, data loss, broken functionality, or a must-have acceptance criterion left unimplemented |
+| **HIGH** | Should fix before merge | A real defect risk under a plausible input or state, a touched acceptance criterion this change does not satisfy, or an unhandled boundary failure |
+| **MEDIUM** | Worth fixing | Maintainability, a limited-impact edge case, or changed behaviour with no convincing test |
+| **LOW** | Optional | Style, naming, formatting, or a small cleanup with little risk |
 
-## 2. Do not trust the description
+Formatting and naming are never `CRITICAL` or `HIGH`.
 
-Verify every claim in the commit messages and the PR description against the code.
+## 2. Evidence bar and findings discipline
 
-- **Recognise:** "tested locally" with no test in the diff; "no behaviour change"
-  next to a changed condition; "kept simple per YAGNI" — that is a claim about a
-  decision, not a rationale for it; "handles the error" where the handler only logs.
-- **Say:** the claim, where the code contradicts it, and what the code actually does.
-- **Severity:** a claim that would have hidden a Critical or Important finding
-  carries that finding's severity; a harmless overstatement is Minor.
+- **Cite or drop.** Every finding cites the touched code with `file:line`. If
+  the exact line cannot be named, it is not a finding.
+- **Trigger or rule.** Every finding names the input, state, sequence, or
+  concrete repository rule that makes it wrong. "This looks fragile" is not a
+  finding. No concrete failure scenario means it belongs under **Unverified** as
+  a question, not under Findings.
+- **Low confidence goes to Unverified.** Do not silently drop a plausible
+  concern. Move it to **Unverified** with what would confirm or refute it.
+- **More than five `LOW` findings become one pattern.** Cite each instance in
+  that single pattern observation instead of listing six nits.
+- **Zero findings on a non-trivial scope means re-examine.** Make a second pass
+  before returning a clean review.
+- **Flag only what the change touched.** A pre-existing complexity spike,
+  duplicate, or architectural issue stays out unless the changed code depends on
+  it directly.
+- **Read-only includes git state.** Never `checkout`, `switch`, `restore`,
+  `reset`, or `stash` in a shared tree. Read other refs with `git diff`,
+  `git show`, and PR metadata commands.
 
-## 3. Security
+## 3. Correctness and claims
 
-- **Recognise:** a secret, token or connection string in code or config; input from
-  a request, a file or an environment variable used in a shell command, a query or a
-  path without validation; credentials, tokens or personal data written to a log;
-  an external response trusted as if the process wrote it.
-- **Say:** the sink (what the untrusted value reaches) and the source (where it came
-  from), both with file:line.
-- **Severity:** Critical.
+Bugs, races, error handling, boundaries, and author claims all land here.
+
+- **Recognise:** off-by-one errors; null or empty inputs the code never
+  considered; swallowed failures; retries with no cap; claim/behaviour mismatches
+  such as "no behaviour change" beside a changed condition.
+- **Say:** the exact trigger, where it breaks, and what the code actually does.
+- **Severity:** wrong result or data loss → `CRITICAL`; wrong behaviour on a
+  plausible input → `HIGH`; limited-impact edge case → `MEDIUM`.
 
 ## 4. Reuse and simplification
 
-- **Recognise:** the same logic written twice in the diff, or once in the diff and
-  once already in the repository; a helper introduced for one caller when an existing
-  one would do; an abstraction with a single implementation; code that nothing
-  reaches any more after this change.
-- **Say:** the two places (or the existing helper) with file:line, and the one that
-  should survive.
-- **Severity:** Important when a future fix would have to land twice; otherwise Minor.
+Run the simplification lenses inline. Do **not** rely on Claude's `/simplify`.
+There is no efficiency lens here.
 
-## 5. SOLID — recognisable violations only
+- **Reuse:** the same logic written twice in the diff, or once in the diff and
+  once already in the repository; a new helper where an existing one would do.
+- **Quality:** redundant state, parameter sprawl, copy-paste with slight
+  variation, dead code after the change, stubs and TODO-shaped scaffolding.
+- **Altitude:** an abstraction at the wrong level — a concept derived in three
+  places that should be named once, or a duplicated invariant that should live
+  with the thing it describes.
+- **Severity:** a future fix landing twice, or complexity that hides behaviour →
+  `HIGH`; otherwise `MEDIUM` or `LOW`.
 
-Name the principle only when the symptom is concrete. Do not audit the whole design.
+When the same duplicate pattern spans several touched files, report it once with
+all of its citations.
 
-- **SRP:** a module or class with two reasons to change — persistence and
-  formatting in one file, a handler that also parses config.
-- **OCP:** a `switch` or `if` chain on a type or kind where a polymorphic call already
-  exists on that type.
-- **LSP:** a subclass or implementation that weakens the contract — throws where the
-  parent returns, ignores an argument the parent honours, returns null where the
-  parent never does.
-- **ISP:** an interface whose clients each use a fraction of it, forcing stubs.
-- **DIP:** high-level code importing a concrete low-level module — a database client,
-  an HTTP library — that it could take as a parameter.
-- **Severity:** Important when it makes the change fragile or hard to test; Minor when
-  it is contained.
+## 5. Security, architecture, and traceability
 
-## 6. KISS
+- **Security:** untrusted input flowing into a shell command, query, path, or
+  log without validation; secrets or credentials in code or config.
+- **Architecture compliance:** judge against the touched work item's acceptance
+  criteria and, when present, `docs/blueprint/<area>.md`. A missing layer
+  boundary, wrong dependency direction, or skipped required component is a
+  finding only when the touched change should have satisfied that contract.
+- **Traceability:** if the change claims to satisfy an acceptance criterion,
+  point to the code and the proving test. A touched criterion with no proving
+  code or no convincing test is a finding.
+- **Severity:** security hole or must-have architectural/acceptance miss →
+  `CRITICAL` or `HIGH`; looser maintainability drift → `MEDIUM`.
 
-- **Recognise:** a solution more complex than the problem it solves; configurability
-  nobody asked for (a flag with one value in use); three layers where one would do;
-  a generic engine built to run one case.
-- **Say:** the simpler shape that would meet the same requirement.
-- **Severity:** Important when the complexity hides behaviour; otherwise Minor.
+## 6. Tests, code quality, and size
 
-## 7. YAGNI
+- **Tests:** a changed behaviour with no meaningful assertion; a boundary or
+  error path added here with no test; a test that would still pass if the code
+  were wrong.
+- **Code quality:** TODOs in live code, dead branches, unreachable paths,
+  scaffolding, or error handling that only logs and continues.
+- **Size thresholds:** `scripts/file-sizes.sh` prints them from the reviewed
+  range. A new or grown file over **300 lines** is `HIGH` unless the PR
+  explains why it must stay whole; over **500 lines** is always `HIGH`. A
+  function over **50 lines** is `LOW` unless it also creates a clearer
+  maintainability problem.
 
-- **Recognise:** code nothing calls; parameters nothing passes; a branch marked "for
-  later" or guarded by a condition that cannot be true today; a type with fields
-  nothing reads.
-- **Say:** the unused element and the evidence it is unused (the search you ran).
-- **Severity:** Minor — unless the unused code is also a maintenance trap, then
-  Important.
+Do not ask for tests in the abstract. Name the missing changed behaviour or the
+test that cannot fail.
 
-## 8. Small files and functions
+## 7. Verify pass
 
-Thresholds, applied to the state of the file after the change
-(`scripts/file-sizes.sh` prints them):
+Before finalising the report, reopen each cited file and check every draft
+finding against the whole file, not only the diff hunk.
 
-- A new or grown file **over 300 lines** → Important, unless the PR description says
-  why it must be one file.
-- A file **over 500 lines** → Important, always.
-- A function **over 50 lines** → Minor.
-- A file that mixes two responsibilities → an SRP finding (rule 5), regardless of
-  size.
+- The full file confirms it → keep the finding.
+- The full file refutes it → drop it.
+- The full file still leaves it uncertain → move it to **Unverified**.
 
-## 9. Tests
+This verify pass is mandatory. A plausible finding that the whole file disproves
+must not survive.
 
-- **Recognise:** a test that asserts on a mock's call rather than on the behaviour
-  the user sees; a test with no assertion (it passes because nothing checks); a
-  change to error handling, boundaries or concurrency with no test on that edge; a
-  test that prints, warns or leaves files behind — pristine output is part of the
-  contract.
-- **Say:** which behaviour of the change has no test, or which test would still pass
-  if the code were wrong.
-- **Severity:** a test that cannot fail → Important; a missing edge-case test →
-  Important when the edge is one the change introduced, otherwise Minor. "Could have
-  more tests" is always Minor.
+## 8. Report format
 
-## 10. Calibration
-
-- **Critical** — data loss, a security hole, a wrong result. Blocks the merge.
-- **Important** — wrong or fragile behaviour, a missed requirement, or maintainability
-  you would block a merge over.
-- **Minor** — polish. Worth a line, never a blocker.
-
-Praise what is done well, specifically, before the list: the test that catches the
-regression, the helper that removed three copies, the commit that was split cleanly.
-Vague praise is padding; skip it.
-
-Do not pad with style nits when there are real findings. If the only findings are
-Minor, say so in the verdict.
-
-## Report format
+Praise what is done well, specifically, before the list: the test that catches
+the regression, the helper that removed three copies, the clean split of a
+change. Vague praise is padding; skip it.
 
 ```markdown
 ### Verdict
 Approve | Fix first — one sentence saying why.
 
 ### Strengths
-- Specific, with file:line where it applies.
+- Specific, with file:line where it helps.
 
 ### Findings
-#### Critical
-- `path/to/file.ts:42` — what — why (the input or rule) — how to fix
-#### Important
+#### CRITICAL
+- `path/to/file.ts:42` — what — why (the input, state, sequence, or rule) — how to fix
+#### HIGH
 - ...
-#### Minor
+#### MEDIUM
+- ...
+#### LOW
 - ...
 
 ### Unverified
-- A claim or suspicion the reviewer could not confirm from the code, with what would
-  confirm it. Never stated as a finding.
+- A low-confidence item, question, or missing trigger that the reviewer could not
+  confirm from the code, with what would confirm or refute it.
 ```
 
-An empty severity group is omitted. An empty Findings section means Approve.
+Empty severity groups are omitted. An empty Findings section means Approve.

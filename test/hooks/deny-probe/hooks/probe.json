@@ -1,0 +1,10 @@
+{
+  "name": "probe",
+  "description": "A deny hook used only by test/hooks.test.js to prove the generated command fails open.",
+  "event": "PreToolUse",
+  "matcher": ["Bash"],
+  "script": "scripts/probe",
+  "denies": true,
+  "timeoutSec": 5,
+  "platforms": ["claude"]
+}

@@ -1,0 +1,22 @@
+{
+  "_comment": "Shared by the Node create and the qa-ado-work-item PowerShell publish: the same draft gives the same patch and the same canonical fields. test/ado-backlog-placement.test.js pins both scripts against it.",
+  "organization": "https://dev.azure.com/Acme/",
+  "project": "Orion",
+  "draft": {
+    "type": "Product Backlog Item",
+    "parentId": 4120,
+    "fields": {
+      "System.Title": "CSV export on the report page",
+      "System.Description": "<p>Export what the page shows.</p>",
+      "Microsoft.VSTS.Common.AcceptanceCriteria": "",
+      "System.AreaPath": "Orion\\Reporting"
+    }
+  },
+  "patch": [
+    { "op": "add", "path": "/fields/System.Title", "value": "CSV export on the report page" },
+    { "op": "add", "path": "/fields/System.Description", "value": "<p>Export what the page shows.</p>" },
+    { "op": "add", "path": "/fields/System.AreaPath", "value": "Orion\\Reporting" },
+    { "op": "add", "path": "/relations/-", "value": { "rel": "System.LinkTypes.Hierarchy-Reverse", "url": "https://dev.azure.com/Acme/_apis/wit/workItems/4120", "attributes": { "comment": "Parent" } } }
+  ],
+  "canonicalPrefix": "https://dev.azure.com/acme|orion|Product Backlog Item|4120|"
+}

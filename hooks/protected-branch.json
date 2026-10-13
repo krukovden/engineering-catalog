@@ -1,0 +1,10 @@
+{
+  "name": "protected-branch",
+  "description": "Deny git commit on main or master in a repository on Azure Repos or with a catalog receipt (§2.1). Checks the branch, never the message; fails open.",
+  "event": "PreToolUse",
+  "matcher": ["Bash"],
+  "script": "hooks/protected-branch",
+  "denies": true,
+  "timeoutSec": 10,
+  "platforms": ["claude"]
+}

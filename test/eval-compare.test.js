@@ -67,7 +67,7 @@ function fakeExec({ root, scores, seen = [] }) {
     const arm = args[0] === root ? 'candidate' : 'base';
     const runs = Number(flag(args, '--runs'));
     const score = scores[arm][caseName];
-    seen.push({ arm, caseName, model: flag(args, '--model'), effort: env.CLAUDE_CODE_EFFORT_LEVEL, runs, allowTools: args.includes('--allow-tools') });
+    seen.push({ arm, caseName, model: flag(args, '--model'), judgeModel: flag(args, '--judge-model'), effort: env.CLAUDE_CODE_EFFORT_LEVEL, runs, allowTools: args.includes('--allow-tools') });
     const one = (i) => ({
       score, passed: score === 1, turns: 2, costUsd: arm === 'base' ? 0.01 : 0.011,
       judgeCostUsd: 0, durationSeconds: 10, startedAt: `2026-09-16T18:0${i}:00.000Z`,
@@ -130,6 +130,7 @@ test('compare runs both arms of every affected case and reports numbers without 
   assert.deepEqual([...new Set(seen.map((s) => s.model))], ['claude-haiku-4-5']);
   assert.deepEqual([...new Set(seen.map((s) => s.effort))], ['low'], 'the cell effort reaches the child session');
   assert.deepEqual([...new Set(seen.map((s) => s.runs))], [2]);
+  assert.deepEqual([...new Set(seen.map((s) => s.judgeModel))], ['claude-opus-5'], 'the pinned judge reaches the native runner');
   assert.ok(seen.every((s) => s.allowTools), 'the cases name Bash, so the grant is passed through');
   // Both arms of one case run back to back, and which goes first alternates per case.
   assert.deepEqual(seen.map((s) => s.arm), ['base', 'candidate', 'candidate', 'base']);
@@ -154,6 +155,7 @@ test('compare runs both arms of every affected case and reports numbers without 
   assert.equal(result.fingerprint.baseSha, baseSha);
   assert.equal(result.fingerprint.candidateDirty, true, 'the candidate is the working tree, dirty and all');
   assert.ok(result.fingerprint.suiteHash);
+  assert.deepEqual(result.fingerprint.judge, { target: 'claude', model: 'claude-opus-5' }, 'only what was applied: no effort flag exists');
   assert.ok(fs.existsSync(path.join(root, 'evals/results')), 'raw records are kept, and git-ignored');
   assert.equal(git(root, 'worktree', 'list').split('\n').length, 1, 'the base worktree is cleaned up');
   fs.rmSync(root, { recursive: true, force: true });

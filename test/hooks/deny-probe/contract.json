@@ -1,0 +1,33 @@
+{
+  "id": "PreToolUse.probe",
+  "scenarios": [
+    {
+      "name": "a matching call is denied, with its reason",
+      "stdin": { "claude": { "tool_name": "Bash", "tool_input": { "command": "deny-me" } }, "copilot": { "toolName": "bash", "toolArgs": { "command": "deny-me" } } },
+      "expect": { "exit": 0, "decision": "deny", "reason": "probe denied" }
+    },
+    {
+      "name": "an ordinary call goes ahead",
+      "stdin": { "claude": { "tool_name": "Bash", "tool_input": { "command": "ls" } }, "copilot": { "toolName": "bash", "toolArgs": { "command": "ls" } } },
+      "expect": { "exit": 0, "decision": "allow" }
+    },
+    {
+      "name": "the script throws — fails open",
+      "stdin": { "claude": { "tool_name": "Bash", "tool_input": { "command": "boom deny-me" } }, "copilot": { "toolName": "bash", "toolArgs": { "command": "boom deny-me" } } },
+      "expect": { "exit": 0, "decision": "allow" }
+    },
+    {
+      "name": "node is missing — fails open",
+      "setup": { "noNode": true },
+      "stdin": { "claude": { "tool_name": "Bash", "tool_input": { "command": "deny-me" } }, "copilot": { "toolName": "bash", "toolArgs": { "command": "deny-me" } } },
+      "expect": { "exit": 0, "decision": "allow" }
+    },
+    {
+      "name": "the project directory is absent — fails open",
+      "platforms": ["copilot"],
+      "env": { "COPILOT_PROJECT_DIR": "/nonexistent/engcat-probe" },
+      "stdin": { "toolName": "bash", "toolArgs": { "command": "deny-me" } },
+      "expect": { "exit": 0, "decision": "allow" }
+    }
+  ]
+}

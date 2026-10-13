@@ -10,23 +10,86 @@ const os = require('os');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
-const START = '<!-- engineering-catalog:memory:start -->';
+const POINTER_VERSION = 1;
+const HOOK_VERSION = 1;
+const START_PREFIX = '<!-- engineering-catalog:memory:start';
 const END = '<!-- engineering-catalog:memory:end -->';
-const HOOK_START = '# engineering-catalog:memory:start';
+const HOOK_START_PREFIX = '# engineering-catalog:memory:start';
 const HOOK_END = '# engineering-catalog:memory:end';
+
+function marker(startPrefix, end, version, suffix = '') {
+  return {
+    startPrefix,
+    start: `${startPrefix} v=${version}${suffix}`,
+    end,
+    suffix,
+    version,
+  };
+}
+
+const POINTER_MARKER = marker(START_PREFIX, END, POINTER_VERSION, ' -->');
+const HOOK_MARKER = marker(HOOK_START_PREFIX, HOOK_END, HOOK_VERSION);
 
 // managedBlock — replace the block between the markers in place, or append a
 // new block (with a leading blank line) when the markers are absent. Same
 // semantics regardless of comment style: pass the exact marker lines to use.
 // A marker counts only when it is a whole line: a file that merely *mentions* the marker in
 // prose (CLAUDE.md documents them) must not have its text swallowed as if it were the block.
-function managedBlock(existing, start, end, content) {
-  const block = `${start}\n${content}\n${end}`;
-  const re = new RegExp(`^[ \\t]*${escapeRe(start)}[ \\t]*$[\\s\\S]*?^[ \\t]*${escapeRe(end)}[ \\t]*$`, 'm');
+function managedBlock(existing, markerSpec, content) {
+  const block = `${markerSpec.start}\n${content}\n${markerSpec.end}`;
+  const startRe = `^[ \\t]*${escapeRe(markerSpec.startPrefix)}(?: v=\\d+)?${escapeRe(markerSpec.suffix)}[ \\t]*$`;
+  const re = new RegExp(`${startRe}[\\s\\S]*?^[ \\t]*${escapeRe(markerSpec.end)}[ \\t]*$`, 'm');
   if (re.test(existing)) return existing.replace(re, () => block);
   if (existing.length === 0) return `${block}\n`;
   const sep = existing.endsWith('\n') ? '\n' : '\n\n';
   return `${existing}${sep}${block}\n`;
+}
+
+function markerVersion(existing, markerSpec) {
+  const re = new RegExp(`^[ \\t]*${escapeRe(markerSpec.startPrefix)}(?: v=(\\d+))?${escapeRe(markerSpec.suffix)}[ \\t]*$`, 'm');
+  const m = re.exec(existing);
+  if (!m) return null;
+  return m[1] ? Number(m[1]) : 0;
+}
+
+function writeFilesAtomically(edits) {
+  const changes = [];
+  for (let i = 0; i < edits.length; i += 1) {
+    const edit = edits[i];
+    if (edit.updated === edit.existing) continue;
+    const originalExists = fs.existsSync(edit.file);
+    let originalMode = null;
+    if (originalExists) originalMode = fs.statSync(edit.file).mode & 0o777;
+    const tmp = `${edit.file}.engcat-tmp-${process.pid}-${Date.now()}-${i}`;
+    fs.mkdirSync(path.dirname(tmp), { recursive: true });
+    fs.writeFileSync(tmp, edit.updated);
+    if (edit.mode != null) fs.chmodSync(tmp, edit.mode);
+    changes.push({ ...edit, tmp, originalExists, originalMode });
+  }
+  const renamed = [];
+  try {
+    for (const change of changes) {
+      fs.renameSync(change.tmp, change.file);
+      if (change.mode != null) fs.chmodSync(change.file, change.mode);
+      renamed.push(change);
+    }
+  } catch (err) {
+    for (let i = renamed.length - 1; i >= 0; i -= 1) {
+      const change = renamed[i];
+      if (change.originalExists) {
+        fs.writeFileSync(change.file, change.existing);
+        if (change.originalMode != null) fs.chmodSync(change.file, change.originalMode);
+      } else if (fs.existsSync(change.file)) {
+        fs.unlinkSync(change.file);
+      }
+    }
+    throw err;
+  } finally {
+    for (const change of changes) {
+      if (fs.existsSync(change.tmp)) fs.unlinkSync(change.tmp);
+    }
+  }
+  return changes.length > 0;
 }
 
 function escapeRe(s) {
@@ -125,18 +188,17 @@ function pointerContent(ctx) {
 function stepPointers(ctx) {
   const targets = ['CLAUDE.md', '.github/copilot-instructions.md', 'AGENTS.md'];
   const content = pointerContent(ctx);
-  let anyDone = false;
   const detail = [];
+  const edits = [];
   for (const rel of targets) {
     const file = path.join(ctx.project, rel);
     const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
-    const updated = managedBlock(existing, START, END, content);
-    if (updated === existing) { detail.push(`${rel}: kept`); continue; }
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, updated);
-    anyDone = true;
-    detail.push(`${rel}: done`);
+    const updated = managedBlock(existing, POINTER_MARKER, content);
+    detail.push(`${rel}: ${updated === existing ? 'kept' : 'done'}`);
+    edits.push({ file, existing, updated });
   }
+  for (const edit of edits) fs.mkdirSync(path.dirname(edit.file), { recursive: true });
+  const anyDone = writeFilesAtomically(edits);
   return { state: anyDone ? 'done' : 'kept', detail: detail.join('; ') };
 }
 
@@ -158,13 +220,12 @@ function stepHook(ctx) {
     : `$(git rev-parse --show-toplevel)/${toPosix(ctx.dir)}/.pending`;
   const content = `git rev-parse HEAD >> "${pendingFile}"`;
   const existing = fs.existsSync(hookFile) ? fs.readFileSync(hookFile, 'utf8') : '#!/bin/sh\n';
-  const updated = managedBlock(existing, HOOK_START, HOOK_END, content);
+  const updated = managedBlock(existing, HOOK_MARKER, content);
   if (updated === existing) {
     fs.chmodSync(hookFile, 0o755);
     return { state: 'kept', detail: hookFile };
   }
-  fs.writeFileSync(hookFile, updated);
-  fs.chmodSync(hookFile, 0o755);
+  writeFilesAtomically([{ file: hookFile, existing, updated, mode: 0o755 }]);
   return { state: 'done', detail: hookFile };
 }
 
@@ -207,6 +268,7 @@ function main() {
     } catch (err) {
       steps.push({ name, state: 'error', detail: err.message });
       hadError = true;
+      break;
     }
   }
   if (ctx.json) {
@@ -220,4 +282,8 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { managedBlock, parseArgs, memoryDirFor, pointerContent, STEPS };
+module.exports = {
+  POINTER_VERSION, HOOK_VERSION, POINTER_MARKER, HOOK_MARKER,
+  managedBlock, markerVersion, writeFilesAtomically,
+  parseArgs, memoryDirFor, pointerContent, STEPS,
+};

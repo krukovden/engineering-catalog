@@ -1,2169 +1,862 @@
 'use strict';
-
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { PassThrough } = require('stream');
-const { execFileSync, spawnSync } = require('child_process');
 
-const {
-  chooseState,
-  discoverStates,
-  moveWorkItem,
-  parseAzureReposRemote,
-  reconcileBoard,
-  parseBranchWorkItem,
-  parsePullRequestWorkItem,
-  requiredFieldName,
-  resolveAdoContext,
-  loadProjectState,
-} = require('../skills/shared/ado-board/scripts/lib');
+const DIR = path.join(__dirname, '..', 'skills/shared/ado-board/scripts');
+const FIX = path.join(__dirname, 'fixtures/ado-board');
+const json = (n) => JSON.parse(fs.readFileSync(path.join(FIX, n), 'utf8'));
+const L = require(path.join(DIR, 'board-logic.js'));
+const board = require(path.join(DIR, 'board.js'));
 
-const SCRIPT = path.join(__dirname, '..', 'skills/shared/ado-board/scripts/ado-board.js');
+const MAP = json('map.json');
+const NOW = '2026-10-12T12:00:00Z';
+const daysAgo = (n) => new Date(Date.parse(NOW) - n * 86400000).toISOString();
+const item = (id, type, state, extra = {}) => ({ id, type, state, tags: '', title: `item ${id}`, stateChangeDate: daysAgo(1), ...extra });
+const items = (...xs) => Object.fromEntries(xs.map((x) => [x.id, x]));
 
-const gitEnv = {
-  ...process.env,
-  GIT_AUTHOR_NAME: 't',
-  GIT_AUTHOR_EMAIL: 't@example.com',
-  GIT_COMMITTER_NAME: 't',
-  GIT_COMMITTER_EMAIL: 't@example.com',
-};
+// --- states discover -------------------------------------------------------------------
 
-function git(cwd, ...args) {
-  return execFileSync('git', args, {
-    cwd,
-    env: gitEnv,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    encoding: 'utf8',
-  }).trim();
-}
+test('mapType: categories map onto buckets; Resolved is verify; Removed is no target', () => {
+  const t = L.mapType('Bug', json('states-bug-agile.json').value);
+  assert.deepEqual(t.targets, { todo: 'New', doing: 'Active', verify: 'Resolved', done: 'Closed' });
+  assert.equal(t.states.Resolved, 'verify');
+  assert.equal(t.states.Removed, 'removed');
+  assert.deepEqual(t.ambiguous, []);
+});
 
-function httpError(status, message) {
-  const error = new Error(message);
-  error.status = status;
-  return error;
-}
+test('mapType: a category holding two states asks once; a valid choice settles it', () => {
+  const states = json('states-pbi-scrum.json').value;
+  const open = L.mapType('Product Backlog Item', states);
+  assert.deepEqual(open.ambiguous, [{ type: 'Product Backlog Item', bucket: 'todo', states: ['New', 'Approved'] }]);
+  assert.equal(open.targets.todo, undefined);
+  const chosen = L.mapType('Product Backlog Item', states, L.parseChoices('Product Backlog Item:todo=Approved'));
+  assert.deepEqual(chosen.ambiguous, []);
+  assert.equal(chosen.targets.todo, 'Approved');
+  assert.equal(L.mapType('Product Backlog Item', states, { 'Product Backlog Item:todo': 'Bogus' }).ambiguous.length, 1);
+});
 
-// Real /updates semantics: fields carry the change time (System.ChangedDate.newValue);
-// revisedDate is when the revision was superseded — the next revision's change time,
-// 9999-01-01 for the latest one. Fixtures may seed `revisedDate` as the change time; it is
-// converted to a ChangedDate field here so tests never lean on the wrong meaning.
-function realShapedUpdates(list) {
-  const out = list.map((update) => {
-    const copy = structuredClone(update);
-    copy.fields = copy.fields || {};
-    if (!copy.fields['System.ChangedDate']) copy.fields['System.ChangedDate'] = { newValue: copy.revisedDate };
-    return copy;
+test('parseChoices: several choices separated by ;', () => {
+  assert.deepEqual(L.parseChoices('Bug:todo=New; User Story:doing = Active;junk'), { 'Bug:todo': 'New', 'User Story:doing': 'Active' });
+});
+
+test('buildMap: holds organization, project and states — never a credential or its path', () => {
+  const { map, ambiguous } = L.buildMap({
+    organization: 'https://dev.azure.com/acme', project: 'Orion', now: NOW,
+    types: { Bug: json('states-bug-agile.json').value, 'Product Backlog Item': json('states-pbi-scrum.json').value },
   });
-  out.forEach((update, index) => {
-    update.revisedDate = index + 1 < out.length
-      ? out[index + 1].fields['System.ChangedDate'].newValue
-      : '9999-01-01T00:00:00Z';
+  assert.equal(ambiguous.length, 1);
+  assert.equal(map.version, 1);
+  assert.deepEqual(Object.keys(map.types), ['Bug', 'Product Backlog Item']);
+  assert.doesNotMatch(JSON.stringify(map), /pat|token|ado-credentials|password/i);
+});
+
+test('boardTypes: drops disabled and non-board types', () => {
+  assert.deepEqual(L.boardTypes(json('workitemtypes.json').value), ['Bug', 'Product Backlog Item']);
+});
+
+// --- move ------------------------------------------------------------------------------
+
+test('checkMove: forward is allowed and names the target state', () => {
+  const d = L.checkMove({ map: MAP, item: item(1, 'User Story', 'New'), bucket: 'doing' });
+  assert.equal(d.ok, true);
+  assert.equal(d.toState, 'Active');
+});
+
+test('checkMove: forward only — same bucket is a no-op, backwards is refused', () => {
+  assert.equal(L.checkMove({ map: MAP, item: item(1, 'Bug', 'Active'), bucket: 'doing' }).code, 'same');
+  const back = L.checkMove({ map: MAP, item: item(1, 'Bug', 'Resolved'), bucket: 'doing' });
+  assert.equal(back.ok, false);
+  assert.equal(back.code, 'backwards');
+});
+
+test('checkMove: Removed is never touched; idp: cards only with allowIdp', () => {
+  assert.equal(L.checkMove({ map: MAP, item: item(1, 'Bug', 'Removed'), bucket: 'done' }).code, 'removed');
+  const idp = item(2, 'User Story', 'New', { tags: 'frontend; IDP:phase-build' });
+  assert.equal(L.checkMove({ map: MAP, item: idp, bucket: 'doing' }).code, 'idp');
+  assert.equal(L.checkMove({ map: MAP, item: idp, bucket: 'doing', allowIdp: true }).ok, true);
+});
+
+test('checkMove: unknown type, unknown state, missing target, bad bucket', () => {
+  assert.equal(L.checkMove({ map: MAP, item: item(1, 'Epic', 'New'), bucket: 'doing' }).code, 'unknown-type');
+  assert.equal(L.checkMove({ map: MAP, item: item(1, 'Bug', 'Triaged'), bucket: 'doing' }).code, 'unknown-state');
+  assert.equal(L.checkMove({ map: MAP, item: item(1, 'Task', 'In Progress'), bucket: 'verify' }).code, 'no-target');
+  assert.equal(L.checkMove({ map: MAP, item: item(1, 'Task', 'To Do'), bucket: 'closed' }).code, 'bad-bucket');
+});
+
+test('movePatch: revision test first, then state and evidence comment in one json-patch', () => {
+  assert.deepEqual(L.movePatch(7, 'Active', 'branch x'), [
+    { op: 'test', path: '/rev', value: 7 },
+    { op: 'add', path: '/fields/System.State', value: 'Active' },
+    { op: 'add', path: '/fields/System.History', value: 'branch x' },
+  ]);
+});
+
+test('requiredFieldFromError: names the field; other errors give null', () => {
+  assert.deepEqual(L.requiredFieldFromError(json('rule-error-required.json')), { field: 'Microsoft.VSTS.Common.ResolvedReason', name: 'Resolved Reason' });
+  assert.deepEqual(L.requiredFieldFromError({ message: 'TF401320: Rule Error for field Severity. Error code: Required, InvalidEmpty.' }), { field: null, name: 'Severity' });
+  assert.equal(L.requiredFieldFromError({ message: 'TF401347: Invalid tree name given for work item -1, field System.AreaPath.' }), null);
+  assert.equal(L.requiredFieldFromError('oops'), null);
+});
+
+// --- git and PR facts ------------------------------------------------------------------
+
+test('branchWorkItemId / titleWorkItemIds', () => {
+  assert.equal(L.branchWorkItemId('refs/heads/feature/ADO-123-add-export'), 123);
+  assert.equal(L.branchWorkItemId('bug/ado-77-crash'), 77);
+  assert.equal(L.branchWorkItemId('feature/ADO-123'), 123);
+  assert.equal(L.branchWorkItemId('feature/ADO-123x'), null);
+  assert.equal(L.branchWorkItemId('hotfix/ADO-1-x'), null);
+  assert.equal(L.branchWorkItemId('main'), null);
+  assert.deepEqual(L.titleWorkItemIds('feat(123): add export'), [123]);
+  assert.deepEqual(L.titleWorkItemIds('fix(5, 6): two'), [5, 6]);
+  assert.deepEqual(L.titleWorkItemIds('chore: bump'), []);
+});
+
+test('parseRemoteUrl: https, visualstudio.com and ssh forms', () => {
+  const want = { org: 'https://dev.azure.com/acme', project: 'Orion Space', repo: 'api' };
+  assert.deepEqual(L.parseRemoteUrl('https://acme@dev.azure.com/acme/Orion%20Space/_git/api'), want);
+  assert.deepEqual(L.parseRemoteUrl('https://acme.visualstudio.com/DefaultCollection/Orion%20Space/_git/api'), want);
+  assert.deepEqual(L.parseRemoteUrl('git@ssh.dev.azure.com:v3/acme/Orion%20Space/api'), want);
+  assert.equal(L.parseRemoteUrl('git@github.com:acme/api.git'), null);
+});
+
+// --- reconcile planner -----------------------------------------------------------------
+
+const pr = (id, extra = {}) => ({ id, title: `PR ${id}`, sourceRefName: 'refs/heads/topic', closedDate: daysAgo(1), workItemIds: [], transitionWorkItems: false, ...extra });
+
+test('reconcile: a pushed branch moves a todo item to doing', () => {
+  const plan = L.planReconcile({
+    map: MAP, now: NOW,
+    branches: [{ name: 'refs/heads/feature/ADO-10-x', ahead: 2, date: daysAgo(0), commit: 'abcdef1234' }],
+    items: items(item(10, 'User Story', 'New')),
   });
-  return out;
+  assert.deepEqual(plan.moves.map((m) => [m.id, m.to, m.toState]), [[10, 'doing', 'Active']]);
+  assert.match(plan.moves[0].evidence, /feature\/ADO-10-x has 2 pushed commit\(s\) \(abcdef1\)/);
+});
+
+test('reconcile: a branch with no pushed commits moves nothing', () => {
+  const plan = L.planReconcile({ map: MAP, now: NOW, branches: [{ name: 'feature/ADO-10-x', ahead: 0, date: daysAgo(0) }], items: items(item(10, 'User Story', 'New')) });
+  assert.deepEqual(plan.moves, []);
+});
+
+test('reconcile: a completed PR moves its linked item to done', () => {
+  const plan = L.planReconcile({ map: MAP, now: NOW, prs: [pr(7, { workItemIds: [20] })], items: items(item(20, 'User Story', 'Active')) });
+  assert.deepEqual(plan.moves.map((m) => [m.id, m.to, m.toState, m.source]), [[20, 'done', 'Closed', 'pr']]);
+});
+
+test('reconcile: a completed PR moves a Bug to verify, not done', () => {
+  const plan = L.planReconcile({ map: MAP, now: NOW, prs: [pr(8, { workItemIds: [30] })], items: items(item(30, 'Bug', 'Active')) });
+  assert.deepEqual(plan.moves.map((m) => [m.id, m.to, m.toState]), [[30, 'verify', 'Resolved']]);
+});
+
+test('reconcile: a Bug whose type has no verify state goes to done', () => {
+  const map = JSON.parse(JSON.stringify(MAP));
+  delete map.types.Bug.targets.verify;
+  const plan = L.planReconcile({ map, now: NOW, prs: [pr(8, { workItemIds: [30] })], items: items(item(30, 'Bug', 'Active')) });
+  assert.equal(plan.moves[0].to, 'done');
+});
+
+test('reconcile: ids also come from the PR title and source branch', () => {
+  const plan = L.planReconcile({
+    map: MAP, now: NOW,
+    prs: [pr(9, { title: 'feat(40): x', sourceRefName: 'refs/heads/feature/ADO-41-y' })],
+    items: items(item(40, 'User Story', 'Active'), item(41, 'Task', 'In Progress')),
+  });
+  assert.deepEqual(plan.moves.map((m) => [m.id, m.toState]), [[40, 'Closed'], [41, 'Done']]);
+});
+
+test('reconcile: never moves a card carrying an idp: tag', () => {
+  const plan = L.planReconcile({
+    map: MAP, now: NOW,
+    branches: [{ name: 'feature/ADO-50-x', ahead: 1, date: daysAgo(0) }],
+    prs: [pr(10, { workItemIds: [51] })],
+    items: items(item(50, 'User Story', 'New', { tags: 'idp:phase-build' }), item(51, 'Bug', 'Active', { tags: 'ui; idp:claimed' })),
+  });
+  assert.deepEqual(plan.moves, []);
+  assert.deepEqual(plan.skipped.map((s) => [s.id, s.code]), [[50, 'idp'], [51, 'idp']]);
+});
+
+test('reconcile: never moves backwards and never touches Removed', () => {
+  const plan = L.planReconcile({
+    map: MAP, now: NOW,
+    branches: [{ name: 'feature/ADO-60-x', ahead: 3, date: daysAgo(0) }, { name: 'bug/ADO-61-y', ahead: 1, date: daysAgo(0) }],
+    items: items(item(60, 'User Story', 'Closed'), item(61, 'Bug', 'Removed')),
+  });
+  assert.deepEqual(plan.moves, []);
+  assert.deepEqual(plan.observed.map((o) => o.id), [60]);
+  assert.deepEqual(plan.skipped.map((s) => [s.id, s.code]), [[61, 'removed']]);
+});
+
+test('reconcile: when the server already moved the item, it observes and does nothing', () => {
+  const plan = L.planReconcile({
+    map: MAP, now: NOW,
+    prs: [pr(11, { workItemIds: [70, 71], transitionWorkItems: true, closedDate: daysAgo(2) })],
+    items: items(item(70, 'User Story', 'Closed'), item(71, 'Bug', 'Resolved')),
+  });
+  assert.deepEqual(plan.moves, []);
+  assert.deepEqual(plan.observed.map((o) => o.id), [70, 71]);
+});
+
+test('reconcile: a PR completed inside the grace window with server transition on is left to the server', () => {
+  const plan = L.planReconcile({
+    map: MAP, now: NOW, graceMinutes: 10,
+    branches: [{ name: 'feature/ADO-80-x', ahead: 1, date: daysAgo(0) }],
+    prs: [pr(12, { workItemIds: [80], transitionWorkItems: true, closedDate: new Date(Date.parse(NOW) - 60000).toISOString() })],
+    items: items(item(80, 'User Story', 'New')),
+  });
+  assert.deepEqual(plan.moves, []);
+  assert.deepEqual(plan.waiting.map((w) => w.id), [80]);
+});
+
+test('reconcile: the highest claim wins — branch and PR on one todo item go straight to done', () => {
+  const plan = L.planReconcile({
+    map: MAP, now: NOW,
+    branches: [{ name: 'feature/ADO-90-x', ahead: 1, date: daysAgo(0) }],
+    prs: [pr(13, { workItemIds: [90] })],
+    items: items(item(90, 'User Story', 'New')),
+  });
+  assert.deepEqual(plan.moves.map((m) => [m.id, m.to]), [[90, 'done']]);
+});
+
+test('reconcile: idempotent — applying the plan and planning again moves nothing', () => {
+  const input = {
+    map: MAP, now: NOW,
+    branches: [{ name: 'feature/ADO-10-x', ahead: 2, date: daysAgo(0) }],
+    prs: [pr(7, { workItemIds: [20, 30] })],
+    items: items(item(10, 'User Story', 'New'), item(20, 'User Story', 'Active'), item(30, 'Bug', 'Active')),
+  };
+  const first = L.planReconcile(input);
+  assert.equal(first.moves.length, 3);
+  const after = JSON.parse(JSON.stringify(input.items));
+  for (const m of first.moves) after[m.id].state = m.toState;
+  const second = L.planReconcile({ ...input, items: after });
+  assert.deepEqual(second.moves, []);
+  assert.equal(second.observed.length, 3);
+});
+
+test('reconcile: missing item is skipped', () => {
+  const plan = L.planReconcile({ map: MAP, now: NOW, branches: [{ name: 'feature/ADO-99-x', ahead: 1, date: daysAgo(0) }], items: {} });
+  assert.deepEqual(plan.skipped.map((s) => [s.id, s.code]), [[99, 'not-found']]);
+});
+
+test('reconcile reports: doing with no pushed commit for N days; pushed work naming no item', () => {
+  const plan = L.planReconcile({
+    map: MAP, now: NOW, staleDays: 5, defaultBranch: 'main',
+    branches: [
+      { name: 'refs/heads/feature/ADO-101-x', ahead: 1, date: daysAgo(9) },
+      { name: 'refs/heads/feature/ADO-102-y', ahead: 1, date: daysAgo(1) },
+      { name: 'refs/heads/spike-cache', ahead: 4, date: daysAgo(2) },
+      { name: 'refs/heads/main', ahead: 0, date: daysAgo(0) },
+    ],
+    items: items(
+      item(101, 'User Story', 'Active', { stateChangeDate: daysAgo(10) }),
+      item(102, 'User Story', 'Active', { stateChangeDate: daysAgo(10) }),
+      item(103, 'Task', 'In Progress', { stateChangeDate: daysAgo(30) }),
+      item(104, 'Task', 'In Progress', { stateChangeDate: daysAgo(2) }),
+      item(105, 'Task', 'In Progress', { stateChangeDate: daysAgo(30), tags: 'idp:run' }),
+    ),
+  });
+  assert.deepEqual(plan.reports.staleDoing.map((s) => s.id), [101, 103]);
+  assert.deepEqual(plan.reports.unlinkedBranches, [{ branch: 'spike-cache', ahead: 4, date: daysAgo(2) }]);
+});
+
+// --- testing states: a completed PR is not tested work ---------------------------------
+
+const TESTING_CHOICES = 'Bug:todo=New;Bug:testing=Ready for Testing;Task:testing=Ready for Testing';
+function testingMap() {
+  const { map, ambiguous } = L.buildMap({
+    organization: MAP.organization, project: MAP.project, now: NOW,
+    types: { Bug: json('states-bug-testing.json').value, Task: json('states-task-testing.json').value, 'User Story': json('states-bug-agile.json').value },
+    choices: L.parseChoices(TESTING_CHOICES),
+  });
+  assert.deepEqual(ambiguous, []);
+  return map;
 }
 
-class FakeTransport {
-  constructor({
-    items = {},
-    updates = {},
-    prs = [],
-    activeIds = [],
-    types = [],
-    states = {},
-    getErrors = {},
-    getUpdatesErrors = {},
-    failMove = null,
-    failMoveById = {},
-    listPrError = null,
-    moveTimestamp = '2026-10-12T15:00:00.000Z',
-  } = {}) {
-    this.items = new Map(Object.entries(items).map(([id, item]) => [String(id), structuredClone(item)]));
-    this.updates = new Map(Object.entries(updates).map(([id, itemUpdates]) => [String(id), realShapedUpdates(itemUpdates)]));
-    this.prs = structuredClone(prs);
-    this.activeIds = activeIds.map(String);
-    this.types = types;
-    this.states = states;
-    this.getErrors = new Map(Object.entries(getErrors).map(([id, error]) => [String(id), error]));
-    this.getUpdatesErrors = new Map(Object.entries(getUpdatesErrors).map(([id, error]) => [String(id), error]));
-    this.failMove = failMove;
-    this.failMoveById = new Map(Object.entries(failMoveById).map(([id, error]) => [String(id), error]));
-    this.listPrError = listPrError;
-    this.moveTimestamp = moveTimestamp;
-    this.moveCount = 0;
-    this.moves = [];
-    this.prQueries = [];
-  }
+test('mapType: states named for testing or acceptance form a testing bucket the person chooses', () => {
+  const states = json('states-bug-testing.json').value;
+  const open = L.mapType('Bug', states, { 'Bug:todo': 'New' });
+  assert.deepEqual(open.ambiguous, [{ type: 'Bug', bucket: 'testing', states: ['Ready for Testing', 'In Testing', 'Ready for Acceptance'] }]);
+  assert.equal(open.targets.doing, 'Committed');
+  assert.equal(open.targets.verify, undefined);
+  const t = testingMap().types.Bug;
+  assert.equal(t.targets.testing, 'Ready for Testing');
+  assert.equal(t.targets.done, 'Done');
+  assert.equal(t.states['Ready for Acceptance'], 'testing');
+  assert.equal(L.mapType('Bug', json('states-bug-agile.json').value).states.Resolved, 'verify');
+});
 
-  async listWorkItemTypes() {
-    return this.types;
-  }
+test('reconcile: items already in a testing state stay there — Task 101535, Bugs 103768 and 103826', () => {
+  const plan = L.planReconcile({
+    map: testingMap(), now: NOW,
+    prs: [pr(201, { workItemIds: [101535] }), pr(202, { workItemIds: [103768] }), pr(203, { title: 'fix(103826): x' })],
+    items: items(item(101535, 'Task', 'Ready for Testing'), item(103768, 'Bug', 'Ready for Testing'), item(103826, 'Bug', 'In Testing')),
+  });
+  assert.deepEqual(plan.moves, []);
+  assert.deepEqual(plan.observed.map((o) => [o.id, o.bucket]), [[101535, 'testing'], [103768, 'testing'], [103826, 'testing']]);
+  assert.match(plan.observed[0].reason, /a person moves it on/);
+});
 
-  async listWorkItemStates(_context, typeName) {
-    return this.states[typeName] || [];
-  }
+test('reconcile: a completed PR moves work before testing to the first testing state, never to done', () => {
+  const plan = L.planReconcile({
+    map: testingMap(), now: NOW,
+    branches: [{ name: 'feature/ADO-301-x', ahead: 1, date: daysAgo(0) }],
+    prs: [pr(204, { workItemIds: [300, 301, 302] })],
+    items: items(item(300, 'Bug', 'Committed'), item(301, 'Task', 'To Do'), item(302, 'Bug', 'Ready for Acceptance')),
+  });
+  assert.deepEqual(plan.moves.map((m) => [m.id, m.to, m.toState, m.source]), [[300, 'testing', 'Ready for Testing', 'pr'], [301, 'testing', 'Ready for Testing', 'pr']]);
+  assert.deepEqual(plan.observed.map((o) => o.id), [302]);
+  assert.match(plan.moves[0].evidence, /PR 204/);
+});
 
-  async getWorkItem(_context, id) {
-    const key = String(id);
-    if (this.getErrors.has(key)) throw this.getErrors.get(key);
-    const item = this.items.get(key);
-    if (!item) throw httpError(404, `unknown work item ${id}`);
-    return structuredClone(item);
-  }
+test('reconcile: a type without testing states still goes to done; a person may still move done', () => {
+  const map = testingMap();
+  const plan = L.planReconcile({ map, now: NOW, prs: [pr(205, { workItemIds: [400] })], items: items(item(400, 'User Story', 'Active')) });
+  assert.deepEqual(plan.moves.map((m) => [m.id, m.to, m.toState]), [[400, 'done', 'Closed']]);
+  const d = L.checkMove({ map, item: item(101535, 'Task', 'Ready for Testing'), bucket: 'done' });
+  assert.equal(d.ok, true);
+  assert.equal(d.toState, 'Done');
+  assert.equal(L.checkMove({ map, item: item(101535, 'Task', 'In Testing'), bucket: 'doing' }).code, 'backwards');
+});
 
-  async getWorkItemUpdates(_context, id) {
-    const key = String(id);
-    if (this.getUpdatesErrors.has(key)) throw this.getUpdatesErrors.get(key);
-    return structuredClone(this.updates.get(key) || []);
-  }
+test('reconcile: an old map without testing never closes a testing-looking item on a PR', () => {
+  const old = JSON.parse(JSON.stringify(MAP));
+  old.types.Bug = {
+    states: { New: 'todo', Approved: 'todo', Committed: 'doing', 'Ready for Testing': 'doing', 'In Testing': 'doing', 'Ready for Acceptance': 'verify', Done: 'done', Removed: 'removed' },
+    targets: { todo: 'New', doing: 'Committed', verify: 'Ready for Acceptance', done: 'Done' },
+  };
+  const plan = L.planReconcile({
+    map: old, now: NOW,
+    branches: [{ name: 'bug/ADO-502-x', ahead: 1, date: daysAgo(0) }],
+    prs: [pr(206, { workItemIds: [103768, 501, 41] })],
+    items: items(item(103768, 'Bug', 'Ready for Testing'), item(501, 'Bug', 'Committed'), item(502, 'Bug', 'New'), item(41, 'Task', 'In Progress')),
+  });
+  assert.deepEqual(plan.moves.map((m) => [m.id, m.to]), [[41, 'done'], [502, 'doing']]);
+  assert.deepEqual(plan.skipped.map((s) => [s.id, s.code]), [[501, 'stale-map'], [103768, 'stale-map']]);
+  assert.match(plan.skipped[0].reason, /run states discover/);
+});
 
-  async moveWorkItemState(_context, { id, rev, state, comment }) {
-    const key = String(id);
-    if (this.failMoveById.has(key)) throw this.failMoveById.get(key);
-    if (this.failMove) throw this.failMove;
-    const item = this.items.get(key);
-    const revisedDate = new Date(new Date(this.moveTimestamp).getTime() + (this.moveCount * 60000)).toISOString();
-    this.moveCount += 1;
-    item.rev = rev + 1;
-    item.fields['System.State'] = state;
-    item.fields['Microsoft.VSTS.Common.StateChangeDate'] = revisedDate;
-    item.fields['System.ChangedDate'] = revisedDate;
-    const itemUpdates = this.updates.get(key) || [];
-    itemUpdates.push({
-      revisedDate,
-      revisedBy: { displayName: 'ado-board reconcile' },
-      fields: {
-        'System.ChangedDate': { newValue: revisedDate },
-        'System.State': { newValue: state },
-        'System.History': { newValue: comment },
-      },
-    });
-    this.updates.set(key, realShapedUpdates(itemUpdates));
-    this.moves.push({ id: key, state, comment });
-    return structuredClone(item);
-  }
+test('states discover: testing states reach the map once the person chose the target', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'adoboard-'));
+  const { deps } = fakeDeps({ home, routes: [{ method: 'GET', match: /workitemtypes\/Bug\/states/, body: json('states-bug-testing.json') }] });
+  const ask = await board.cmdDiscover({ _: [], types: 'Bug', choose: 'Bug:todo=New' }, deps);
+  assert.equal(ask.code, 2);
+  assert.match(ask.out.next, /Bug:testing=Ready for Testing/);
+  const done = await board.cmdDiscover({ _: [], types: 'Bug', choose: 'Bug:todo=New;Bug:testing=Ready for Testing' }, deps);
+  assert.equal(done.code, 0, JSON.stringify(done.out));
+  assert.equal(done.out.types.Bug.testing, 'Ready for Testing');
+});
 
-  async listCompletedPullRequests(_context, options = {}) {
-    if (this.listPrError) throw this.listPrError;
-    this.prQueries.push(structuredClone(options));
-    const timeField = options.queryTimeRangeType === 'closed' ? 'closedDate' : 'creationDate';
-    return this.prs
-      .filter((pr) => !options.targetRefName || pr.targetRefName === options.targetRefName)
-      .filter((pr) => !options.minTime || !pr[timeField] || new Date(pr[timeField]) >= new Date(options.minTime))
-      .map((pr) => structuredClone(pr));
-  }
+// --- nudge -----------------------------------------------------------------------------
 
-  async listTrackedItemsInBuckets() {
-    return this.activeIds.map((id) => structuredClone(this.items.get(String(id))));
-  }
-}
+test('isDue and nudgeLine', () => {
+  const now = Date.parse(NOW);
+  assert.equal(L.isDue({}, 'k', now, 24), true);
+  assert.equal(L.isDue({ k: { lastChecked: daysAgo(0.5) } }, 'k', now, 24), false);
+  assert.equal(L.isDue({ k: { lastChecked: daysAgo(2) } }, 'k', now, 24), true);
+  assert.equal(L.nudgeLine([], 5), '');
+  assert.match(L.nudgeLine([{ id: 1 }, { id: 2 }], 5), /^2 items have not moved: #1, #2 \(doing, no pushed commit for 5 days\)/);
+  assert.match(L.nudgeLine([{ id: 1 }], 5), /^1 item has not moved/);
+});
 
-function createRepo(defaultBranch = 'main') {
-  const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'ado-board-remote-'));
-  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'ado-board-repo-'));
-  git(remote, 'init', '--bare', `--initial-branch=${defaultBranch}`);
-  git(repo, 'init', `--initial-branch=${defaultBranch}`);
-  fs.writeFileSync(path.join(repo, 'README.md'), 'root\n');
-  git(repo, 'add', 'README.md');
-  git(repo, 'commit', '-m', 'init');
-  git(repo, 'remote', 'add', 'origin', remote);
-  git(repo, 'push', '-u', 'origin', defaultBranch);
-  return { repo, remote };
-}
+// --- I/O wiring, with a fake fetch and a fake git --------------------------------------
 
-function createPushedBranch(repo, branchName, fileName, content) {
-  const base = git(repo, 'branch', '--show-current');
-  git(repo, 'checkout', '-b', branchName);
-  fs.writeFileSync(path.join(repo, fileName), `${content}\n`);
-  git(repo, 'add', fileName);
-  git(repo, 'commit', '-m', `add ${fileName}`);
-  git(repo, 'push', '-u', 'origin', branchName);
-  git(repo, 'checkout', base);
-}
-
-function writeAdoConfig(home, organization, project) {
-  const dir = path.join(home, '.ado-credentials');
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
-    activeContext: 'default',
-    contexts: [{ name: 'default', organization, project }],
-  }, null, 2));
-}
-
-function createStateMap() {
+function fakeDeps({ routes, git = {}, home }) {
+  const calls = [];
+  const fetch = async (url, init) => {
+    calls.push({ url, method: init.method, body: init.body, contentType: init.headers['Content-Type'] });
+    const route = routes.find((r) => r.method === init.method && r.match.test(url));
+    if (!route) return { ok: false, status: 404, text: async () => '{}', headers: { get: () => 'application/json' } };
+    // `replies` answers in order, the last one repeating; `body` may be a function of the URL.
+    const reply = route.replies ? (route.replies.length > 1 ? route.replies.shift() : route.replies[0]) : route;
+    const body = typeof reply.body === 'function' ? reply.body(new URL(url)) : reply.body;
+    return { ok: (reply.status || 200) < 400, status: reply.status || 200, text: async () => JSON.stringify(body), headers: { get: () => 'application/json' } };
+  };
+  const gitAnswers = { 'rev-parse --show-toplevel': '/repo', 'remote get-url origin': 'https://dev.azure.com/acme/Orion/_git/api', 'rev-parse --abbrev-ref HEAD': 'feature/ADO-10-x', 'rev-parse HEAD': 'abcdef1234567', ...git };
   return {
-    'Product Backlog Item': {
-      todo: 'New',
-      doing: 'Committed',
-      done: 'Done',
-      removed: 'Removed',
-      categories: {
-        Proposed: ['New', 'Approved'],
-        InProgress: ['Committed'],
-        Completed: ['Done'],
-        Removed: ['Removed', 'Cut'],
-      },
-    },
-    Bug: {
-      todo: 'New',
-      doing: 'Active',
-      done: 'Closed',
-      removed: 'Removed',
-      categories: {
-        Proposed: ['New'],
-        InProgress: ['Active'],
-        Completed: ['Closed'],
-        Removed: ['Removed'],
-      },
-    },
-    Task: {
-      todo: 'New',
-      doing: 'Active',
-      verify: 'Resolved',
-      done: 'Closed',
-      categories: {
-        Proposed: ['New'],
-        InProgress: ['Active'],
-        Resolved: ['Resolved'],
-        Completed: ['Closed'],
-      },
+    calls,
+    deps: {
+      fetch, now: () => NOW, home,
+      env: { ENGCAT_HOME: home, AZURE_DEVOPS_EXT_PAT: 'x' },
+      runAz: () => { throw new Error('no az'); },
+      git: (args) => { const v = gitAnswers[args.join(' ')]; if (v === undefined) throw new Error('no'); return v; },
     },
   };
 }
 
-function createStateFile(repo, state) {
-  const file = path.join(repo, '.engineering-catalog', 'ado-board.json');
+function homeWithMap() {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'adoboard-'));
+  const file = board.mapPaths({ org: MAP.organization, project: MAP.project }, { ENGCAT_HOME: home }).home;
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`);
-  return file;
+  fs.writeFileSync(file, JSON.stringify(MAP));
+  return home;
 }
 
-test('parseBranchWorkItem recognises feature, bug and pbi branches', () => {
-  assert.deepEqual(parseBranchWorkItem('feature/ADO-123-example'), {
-    id: '123',
-    kind: 'feature',
-    branch: 'feature/ADO-123-example',
-  });
-  assert.deepEqual(parseBranchWorkItem('bug/ADO-55-fix-it'), {
-    id: '55',
-    kind: 'bug',
-    branch: 'bug/ADO-55-fix-it',
-  });
-  assert.deepEqual(parseBranchWorkItem('refs/remotes/origin/pbi/9-slice'), {
-    id: '9',
-    kind: 'pbi',
-    branch: 'pbi/9-slice',
-  });
-  assert.equal(parseBranchWorkItem('chore/no-ticket'), null);
+const wi = (id, type, state, tags = '', rev = 1) => ({ id, rev, fields: { 'System.WorkItemType': type, 'System.State': state, 'System.Tags': tags, 'System.Title': `t${id}` } });
+
+test('map lives under ENGCAT_HOME/.engineering-catalog/ado-board, outside the repository', () => {
+  const p = board.mapPaths({ org: 'https://dev.azure.com/acme', project: 'Orion Space' }, { ENGCAT_HOME: '/h' }, '/repo');
+  assert.equal(p.home, path.join('/h', '.engineering-catalog', 'ado-board', 'dev.azure.com-acme', 'orion-space.json'));
+  assert.equal(p.repo, path.join('/repo', '.engineering-catalog', 'ado-board.json'));
 });
 
-test('parseAzureReposRemote recognises Azure HTTPS, userinfo, visualstudio, and ssh remotes', () => {
-  assert.deepEqual(parseAzureReposRemote('https://dev.azure.com/hanwha/Catalog/_git/engineering-catalog'), {
-    organization: 'https://dev.azure.com/hanwha',
-    organizationId: 'hanwha',
-    project: 'Catalog',
-    repository: 'engineering-catalog',
-  });
-  assert.deepEqual(parseAzureReposRemote('https://HAL-TSS@dev.azure.com/HAL-TSS/TSS-Orion/_git/Repo'), {
-    organization: 'https://dev.azure.com/HAL-TSS',
-    organizationId: 'HAL-TSS',
-    project: 'TSS-Orion',
-    repository: 'Repo',
-  });
-  assert.deepEqual(parseAzureReposRemote('https://hal.visualstudio.com/Catalog/_git/engineering-catalog'), {
-    organization: 'https://hal.visualstudio.com',
-    organizationId: 'hal',
-    project: 'Catalog',
-    repository: 'engineering-catalog',
-  });
-  assert.deepEqual(parseAzureReposRemote('https://hal@hal.visualstudio.com/Catalog/_git/Repo'), {
-    organization: 'https://hal.visualstudio.com',
-    organizationId: 'hal',
-    project: 'Catalog',
-    repository: 'Repo',
-  });
-  assert.deepEqual(parseAzureReposRemote('https://hal.visualstudio.com/DefaultCollection/Catalog/_git/Repo'), {
-    organization: 'https://hal.visualstudio.com',
-    organizationId: 'hal',
-    project: 'Catalog',
-    repository: 'Repo',
-  });
-  assert.deepEqual(parseAzureReposRemote('git@ssh.dev.azure.com:v3/HAL-TSS/TSS-Orion/Repo'), {
-    organization: 'https://dev.azure.com/HAL-TSS',
-    organizationId: 'HAL-TSS',
-    project: 'TSS-Orion',
-    repository: 'Repo',
-  });
-  assert.deepEqual(parseAzureReposRemote('ssh://git@ssh.dev.azure.com/v3/HAL-TSS/TSS-Orion/Repo'), {
-    organization: 'https://dev.azure.com/HAL-TSS',
-    organizationId: 'HAL-TSS',
-    project: 'TSS-Orion',
-    repository: 'Repo',
-  });
-  assert.deepEqual(parseAzureReposRemote('hal@vs-ssh.visualstudio.com:v3/hal/Catalog/Repo'), {
-    organization: 'https://hal.visualstudio.com',
-    organizationId: 'hal',
-    project: 'Catalog',
-    repository: 'Repo',
-  });
+test('states discover: asks when ambiguous, writes the map once chosen', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'adoboard-'));
+  const routes = [
+    { method: 'GET', match: /workitemtypes\/Bug\/states/, body: json('states-bug-agile.json') },
+    { method: 'GET', match: /workitemtypes\/Product%20Backlog%20Item\/states/, body: json('states-pbi-scrum.json') },
+    { method: 'GET', match: /workitemtypes\?/, body: json('workitemtypes.json') },
+  ];
+  const { deps } = fakeDeps({ routes, home });
+  const ask = await board.cmdDiscover({ _: [] }, deps);
+  assert.equal(ask.code, 2);
+  assert.equal(ask.out.outcome, 'needs-choice');
+  const done = await board.cmdDiscover({ _: [], choose: 'Product Backlog Item:todo=New' }, deps);
+  assert.equal(done.code, 0);
+  assert.ok(done.out.path.startsWith(home));
+  const saved = JSON.parse(fs.readFileSync(done.out.path, 'utf8'));
+  assert.equal(saved.types['Product Backlog Item'].targets.todo, 'New');
+  assert.doesNotMatch(JSON.stringify(saved), /AZURE_DEVOPS_EXT_PAT|\bx\b/);
 });
 
-test('parsePullRequestWorkItem ignores stray #n references and keeps explicit work item refs', () => {
-  assert.deepEqual(parsePullRequestWorkItem({
-    title: 'feat(42): add board repair',
-    description: 'Step #2 of the upgrade.',
-  }), ['42']);
-  assert.deepEqual(parsePullRequestWorkItem({
-    title: 'chore: dependency update',
-    description: 'Fixes #7 and AB#9 while Step #2 stays plain prose.',
-  }).sort(), ['7', '9']);
-  assert.deepEqual(parsePullRequestWorkItem({
-    title: 'docs: plain note #2',
-    description: 'still just Step #2',
-  }), []);
+test('states discover: legacy map upgrades to the current version; current map is kept', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'adoboard-'));
+  const file = board.mapPaths({ org: MAP.organization, project: MAP.project }, { ENGCAT_HOME: home }).home;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const legacy = { organization: MAP.organization, project: MAP.project, discovered: '2026-01-01T00:00:00Z', types: MAP.types };
+  fs.writeFileSync(file, JSON.stringify(legacy, null, 2) + '\n');
+  const routes = [
+    { method: 'GET', match: /workitemtypes\/Bug\/states/, body: json('states-bug-agile.json') },
+    { method: 'GET', match: /workitemtypes\/Product%20Backlog%20Item\/states/, body: json('states-pbi-scrum.json') },
+    { method: 'GET', match: /workitemtypes\?/, body: json('workitemtypes.json') },
+  ];
+  const { deps } = fakeDeps({ routes, home });
+  const upgraded = await board.cmdDiscover({ _: [], choose: 'Product Backlog Item:todo=New' }, deps);
+  assert.equal(upgraded.out.outcome, 'written');
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).version, L.MAP_VERSION);
+  const kept = await board.cmdDiscover({ _: [], choose: 'Product Backlog Item:todo=New' }, deps);
+  assert.deepEqual([kept.code, kept.out.outcome, kept.out.path], [0, 'kept', file]);
+  assert.ok(kept.out.stateMap.Bug, 'a kept map still answers with its stateMap');
 });
 
-test('discover writes the project state map and prompt text goes to the provided stream', async () => {
-  const stateFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ado-board-state-')), 'ado-board.json');
-  const transport = new FakeTransport({
-    types: [{ name: 'Product Backlog Item' }, { name: 'Bug' }],
-    states: {
-      'Product Backlog Item': [
-        { name: 'New', category: 'Proposed' },
-        { name: 'Approved', category: 'Proposed' },
-        { name: 'Committed', category: 'InProgress' },
-        { name: 'Done', category: 'Completed' },
-      ],
-      Bug: [
-        { name: 'New', category: 'Proposed' },
-        { name: 'Active', category: 'InProgress' },
-        { name: 'Resolved', category: 'Resolved' },
-        { name: 'Closed', category: 'Completed' },
-        { name: 'Removed', category: 'Removed' },
-      ],
-    },
-  });
-
-  const result = await discoverStates({
-    transport,
-    context: { organization: 'https://dev.azure.com/example', project: 'Catalog' },
-    stateFile,
-    choose: ['Product Backlog Item:todo=Approved'],
-    nonInteractive: true,
-  });
-
-  assert.equal(result.ok, true);
-  const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-  assert.equal(saved.stateMap['Product Backlog Item'].todo, 'Approved');
-  assert.deepEqual(saved.stateMap['Product Backlog Item'].categories.Proposed, ['New', 'Approved']);
-  assert.deepEqual(saved.stateMap.Bug.categories.Removed, ['Removed']);
-
-  const input = new PassThrough();
-  input.isTTY = true;
-  input.end('2\n');
-  const output = new PassThrough();
-  output.isTTY = true;
-  let prompt = '';
-  output.on('data', (chunk) => { prompt += chunk.toString('utf8'); });
-  const choice = await chooseState({
-    typeName: 'Product Backlog Item',
-    bucket: 'todo',
-    category: 'Proposed',
-    states: ['New', 'Approved'],
-    nonInteractive: false,
-    chooseMap: {},
-    input,
-    output,
-  });
-  assert.equal(choice.state, 'Approved');
-  assert.match(prompt, /Choose one:/);
-});
-
-test('requiredFieldName matches real TF401320 required fields and ignores invalid state errors', () => {
-  assert.equal(
-    requiredFieldName(new Error('TF401320: Rule Error for field Remaining Work. Error code: Required, InvalidEmpty.')),
-    'Remaining Work',
-  );
-  assert.equal(
-    requiredFieldName(new Error("The field 'System.State' contains value 'Foo' that is not in the list of supported values.")),
-    null,
-  );
-});
-
-test('move refuses backwards movement, reports required fields, and only allows idp-tagged items with explicit opt-in', async () => {
-  const stateMap = createStateMap();
-
-  await assert.rejects(() => moveWorkItem({
-    transport: new FakeTransport({
-      items: {
-        11: {
-          id: 11,
-          rev: 3,
-          fields: {
-            'System.WorkItemType': 'Task',
-            'System.State': 'Active',
-            'System.Tags': '',
-            'System.Title': 'Task',
-          },
-        },
-      },
-    }),
-    context: {},
-    stateMap,
-    id: 11,
-    targetBucket: 'todo',
-  }), /backwards/);
-
-  const required = await moveWorkItem({
-    transport: new FakeTransport({
-      items: {
-        12: {
-          id: 12,
-          rev: 1,
-          fields: {
-            'System.WorkItemType': 'Task',
-            'System.State': 'Active',
-            'System.Tags': '',
-            'System.Title': 'Task',
-          },
-        },
-      },
-      failMove: new Error('TF401320: Rule Error for field Remaining Work. Error code: Required, InvalidEmpty.'),
-    }),
-    context: {},
-    stateMap,
-    id: 12,
-    targetBucket: 'verify',
-    comment: 'evidence',
-  });
-  assert.deepEqual(required, {
-    ok: false,
-    id: '12',
-    error: 'required-field',
-    field: 'Remaining Work',
-    message: 'TF401320: Rule Error for field Remaining Work. Error code: Required, InvalidEmpty.',
-  });
-
-  const idp = await moveWorkItem({
-    transport: new FakeTransport({
-      items: {
-        13: {
-          id: 13,
-          rev: 1,
-          fields: {
-            'System.WorkItemType': 'Product Backlog Item',
-            'System.State': 'New',
-            'System.Tags': 'idp:claimed',
-            'System.Title': 'Runner card',
-          },
-        },
-      },
-    }),
-    context: {},
-    stateMap,
-    id: 13,
-    targetBucket: 'doing',
-  });
-  assert.equal(idp.ok, false);
-  assert.equal(idp.error, 'idp-tagged');
-
-  const allowed = await moveWorkItem({
-    transport: new FakeTransport({
-      items: {
-        14: {
-          id: 14,
-          rev: 1,
-          fields: {
-            'System.WorkItemType': 'Product Backlog Item',
-            'System.State': 'New',
-            'System.Tags': 'idp:claimed',
-            'System.Title': 'Runner card',
-          },
-        },
-      },
-    }),
-    context: {},
-    stateMap,
-    id: 14,
-    targetBucket: 'doing',
-    allowIdp: true,
-    comment: 'runner move',
-  });
-  assert.equal(allowed.ok, true);
-  assert.equal(allowed.to, 'doing');
-});
-
-test('CLI move passes --allow-idp through to the move command', () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'ado-board-cli-'));
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ado-home-'));
-  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'ado-bin-'));
-  const stateFile = path.join(cwd, '.engineering-catalog', 'ado-board.json');
-  fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-  fs.writeFileSync(stateFile, JSON.stringify({
-    version: 1,
-    organization: 'https://dev.azure.com/example',
-    project: 'Catalog',
-    stateMap: createStateMap(),
-  }, null, 2));
-  writeAdoConfig(home, 'https://dev.azure.com/example', 'Catalog');
-  fs.writeFileSync(path.join(bin, 'az'), `#!/bin/sh\nif [ \"$1\" = \"account\" ]; then\n  printf '{\"accessToken\":\"token\"}\\n'\n  exit 0\nfi\nexit 2\n`);
-  fs.chmodSync(path.join(bin, 'az'), 0o755);
-  const mockFetch = path.join(cwd, 'mock-fetch.js');
-  fs.writeFileSync(mockFetch, `
-global.fetch = async (url, options) => {
-  const body = JSON.stringify({
-    id: 14,
-    rev: 2,
-    fields: {
-      "System.WorkItemType": "Product Backlog Item",
-      "System.State": "Committed",
-      "System.Tags": "idp:claimed",
-      "System.Title": "Runner card",
-      "Microsoft.VSTS.Common.StateChangeDate": "2026-10-12T16:00:00.000Z",
-      "System.ChangedDate": "2026-10-12T16:00:00.000Z"
-    }
-  });
-  if (String(url).includes('/workitems/14?')) {
-    if ((options && options.method) === 'PATCH') return { ok: true, text: async () => body };
-    return { ok: true, text: async () => JSON.stringify({
-      id: 14,
-      rev: 1,
-      fields: {
-        "System.WorkItemType": "Product Backlog Item",
-        "System.State": "New",
-        "System.Tags": "idp:claimed",
-        "System.Title": "Runner card",
-        "Microsoft.VSTS.Common.StateChangeDate": "2026-10-12T15:00:00.000Z",
-        "System.ChangedDate": "2026-10-12T15:00:00.000Z"
-      }
-    }) };
+// chmod cannot make a directory read-only for root (the self-hosted CI agent runs as root).
+test('states discover: a write failure leaves the legacy map in place', { skip: process.platform === 'win32' || process.getuid() === 0 }, async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'adoboard-'));
+  const file = board.mapPaths({ org: MAP.organization, project: MAP.project }, { ENGCAT_HOME: home }).home;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ organization: MAP.organization, project: MAP.project, types: MAP.types }, null, 2) + '\n');
+  fs.chmodSync(path.dirname(file), 0o555);
+  try {
+    const routes = [
+      { method: 'GET', match: /workitemtypes\/Bug\/states/, body: json('states-bug-agile.json') },
+      { method: 'GET', match: /workitemtypes\/Product%20Backlog%20Item\/states/, body: json('states-pbi-scrum.json') },
+      { method: 'GET', match: /workitemtypes\?/, body: json('workitemtypes.json') },
+    ];
+    const { deps } = fakeDeps({ routes, home });
+    await assert.rejects(() => board.cmdDiscover({ _: [], choose: 'Product Backlog Item:todo=New' }, deps));
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).version, undefined);
+  } finally {
+    fs.chmodSync(path.dirname(file), 0o755);
   }
-  throw new Error('unexpected url ' + url);
+});
+
+test('move: a transition refused for a required field stops and names the field', async () => {
+  const home = homeWithMap();
+  const { deps, calls } = fakeDeps({ home, routes: [
+    { method: 'GET', match: /workitems\/30\?/, body: wi(30, 'Bug', 'Active') },
+    { method: 'PATCH', match: /workitems\/30\?/, status: 400, body: json('rule-error-required.json') },
+  ] });
+  const r = await board.cmdMove({ _: ['move', '30', 'verify'], comment: 'PR 12 completed' }, deps);
+  assert.equal(r.code, 2);
+  assert.equal(r.out.outcome, 'field-required');
+  assert.equal(r.out.field, 'Microsoft.VSTS.Common.ResolvedReason');
+  assert.match(r.out.detail, /Resolved Reason/);
+  const patch = calls.find((c) => c.method === 'PATCH');
+  assert.equal(patch.contentType, 'application/json-patch+json');
+  assert.equal(calls.filter((c) => c.method === 'PATCH').length, 1);
+  assert.match(JSON.parse(patch.body).find((o) => o.path === '/fields/System.History').value, /Evidence: PR 12 completed/);
+});
+
+test('move: backwards is refused without a PATCH; idp needs --idp', async () => {
+  const home = homeWithMap();
+  const { deps, calls } = fakeDeps({ home, routes: [
+    { method: 'GET', match: /workitems\/31\?/, body: wi(31, 'Bug', 'Closed') },
+    { method: 'GET', match: /workitems\/32\?/, body: wi(32, 'User Story', 'New', 'idp:run') },
+    { method: 'PATCH', match: /workitems\/32\?/, body: {} },
+  ] });
+  const back = await board.cmdMove({ _: ['move', '31', 'doing'] }, deps);
+  assert.equal(back.code, 3);
+  assert.equal(back.out.code, 'backwards');
+  assert.equal((await board.cmdMove({ _: ['move', '32', 'doing'] }, deps)).out.code, 'idp');
+  assert.equal(calls.filter((c) => c.method === 'PATCH').length, 0);
+  const ok = await board.cmdMove({ _: ['move', '32', 'doing'], idp: true }, deps);
+  assert.equal(ok.out.outcome, 'moved');
+});
+
+function reconcileRoutes(itemsBody = { value: [wi(10, 'User Story', 'New'), wi(20, 'Task', 'In Progress'), wi(30, 'Bug', 'Active')] }) {
+  return [
+    { method: 'GET', match: /_git|git\/repositories\/api\?/, body: { id: 'r1', defaultBranch: 'refs/heads/main' } },
+    { method: 'GET', match: /repositories\/r1\/stats\/branches/, body: { value: [
+      { name: 'feature/ADO-10-x', aheadCount: 2, commit: { commitId: 'abc1234', committer: { date: daysAgo(0) } } },
+      { name: 'main', aheadCount: 0, commit: { commitId: 'fff', committer: { date: daysAgo(0) } } },
+    ] } },
+    { method: 'GET', match: /repositories\/r1\/pullrequests\?/, body: { value: [
+      { pullRequestId: 5, title: 'fix(30): crash', sourceRefName: 'refs/heads/bug/ADO-30-crash', closedDate: daysAgo(1), completionOptions: { transitionWorkItems: false } },
+    ] } },
+    { method: 'GET', match: /pullRequests\/5\/workitems/, body: { value: [{ id: '30' }] } },
+    { method: 'POST', match: /_apis\/wit\/wiql/, body: { workItems: [{ id: 20 }] } },
+    { method: 'GET', match: /_apis\/wit\/workitems\?/, body: itemsBody },
+    { method: 'PATCH', match: /workitems\/\d+\?/, body: {} },
+  ];
+}
+
+test('reconcile --dry-run: reads the PR API and the board, prints the plan, writes nothing', async () => {
+  const home = homeWithMap();
+  const { deps, calls } = fakeDeps({ home, routes: reconcileRoutes() });
+  const r = await board.cmdReconcile({ _: ['reconcile'], 'dry-run': true }, deps);
+  assert.equal(r.code, 0);
+  assert.deepEqual(r.out.moves.map((m) => [m.id, m.toState]), [[10, 'Active'], [30, 'Resolved']]);
+  assert.equal(calls.filter((c) => c.method === 'PATCH').length, 0);
+});
+
+test('reconcile: applies each move with an evidence comment', async () => {
+  const home = homeWithMap();
+  const { deps, calls } = fakeDeps({ home, routes: reconcileRoutes() });
+  const r = await board.cmdReconcile({ _: ['reconcile'] }, deps);
+  assert.equal(r.code, 0);
+  const patches = calls.filter((c) => c.method === 'PATCH');
+  assert.equal(patches.length, 2);
+  assert.match(JSON.parse(patches[1].body).find((o) => o.path === '/fields/System.History').value, /PR 5 "fix\(30\): crash" completed/);
+});
+
+test('nudge: silent with no map, then at most once per N hours', async () => {
+  const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'adoboard-'));
+  assert.equal((await board.cmdNudge({ _: [] }, fakeDeps({ home: empty, routes: [] }).deps)).out, null);
+  const home = homeWithMap();
+  const routes = reconcileRoutes({ value: [{ id: 20, fields: { 'System.WorkItemType': 'Task', 'System.State': 'In Progress', 'Microsoft.VSTS.Common.StateChangeDate': daysAgo(20) } }] });
+  const { deps } = fakeDeps({ home, routes });
+  const first = await board.cmdNudge({ _: [] }, deps);
+  assert.match(first.out, /^1 item has not moved: #20/);
+  assert.equal((await board.cmdNudge({ _: [] }, deps)).out, null);
+});
+
+// --- states discover merges into the existing map ---------------------------------------
+
+const discoverRoutes = () => [
+  { method: 'GET', match: /workitemtypes\/Bug\/states/, body: json('states-bug-agile.json') },
+  { method: 'GET', match: /workitemtypes\/Product%20Backlog%20Item\/states/, body: json('states-pbi-scrum.json') },
+  { method: 'GET', match: /workitemtypes\?/, body: json('workitemtypes.json') },
+];
+
+function homeWithFile(map) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'adoboard-'));
+  const file = board.mapPaths({ org: MAP.organization, project: MAP.project }, { ENGCAT_HOME: home }).home;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(map, null, 2) + '\n');
+  return { home, file };
+}
+
+test('states discover: reuses the earlier choice, keeps types not rediscovered and unknown fields', async () => {
+  const pbi = L.mapType('Product Backlog Item', json('states-pbi-scrum.json').value, { 'Product Backlog Item:todo': 'Approved' });
+  const { home, file } = homeWithFile({
+    ...MAP, team: 'keep me',
+    types: { ...MAP.types, 'Product Backlog Item': { states: pbi.states, targets: pbi.targets, note: 'keep me too' } },
+  });
+  const { deps } = fakeDeps({ routes: discoverRoutes(), home });
+  const r = await board.cmdDiscover({ _: [], types: 'Product Backlog Item' }, deps);
+  assert.equal(r.code, 0, JSON.stringify(r.out));
+  assert.equal(r.out.outcome, 'kept');
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(saved.types['Product Backlog Item'].targets.todo, 'Approved');
+  assert.deepEqual(Object.keys(saved.types).sort(), ['Bug', 'Product Backlog Item', 'Task', 'User Story']);
+  assert.equal(saved.team, 'keep me');
+  assert.equal(saved.types['Product Backlog Item'].note, 'keep me too');
+});
+
+test('states discover: --choose overrides an earlier choice; other types and fields survive', async () => {
+  const pbi = L.mapType('Product Backlog Item', json('states-pbi-scrum.json').value, { 'Product Backlog Item:todo': 'Approved' });
+  const { home, file } = homeWithFile({ ...MAP, team: 'keep me', types: { ...MAP.types, 'Product Backlog Item': { states: pbi.states, targets: pbi.targets } } });
+  const { deps } = fakeDeps({ routes: discoverRoutes(), home });
+  const r = await board.cmdDiscover({ _: [], types: 'Product Backlog Item', choose: 'Product Backlog Item:todo=New' }, deps);
+  assert.equal(r.out.outcome, 'written');
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(saved.types['Product Backlog Item'].targets.todo, 'New');
+  assert.ok(saved.types['User Story'] && saved.types.Task);
+  assert.equal(saved.team, 'keep me');
+});
+
+test('states discover: a version bump migrates — unknown fields and other types survive', async () => {
+  const { version, ...legacy } = MAP;
+  const { home, file } = homeWithFile({ ...legacy, team: 'keep me' });
+  const { deps } = fakeDeps({ routes: discoverRoutes(), home });
+  const r = await board.cmdDiscover({ _: [], types: 'Bug' }, deps);
+  assert.equal(r.out.outcome, 'written');
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(saved.version, L.MAP_VERSION);
+  assert.equal(saved.team, 'keep me');
+  assert.deepEqual(Object.keys(saved.types).sort(), ['Bug', 'Task', 'User Story']);
+});
+
+// --- writes carry the revision they were decided on --------------------------------------
+
+const patches = (calls) => calls.filter((c) => c.method === 'PATCH').map((c) => JSON.parse(c.body));
+
+test('move: the PATCH tests /rev from the GET first', async () => {
+  const home = homeWithMap();
+  const { deps, calls } = fakeDeps({ home, routes: [
+    { method: 'GET', match: /workitems\/40\?/, body: wi(40, 'User Story', 'New', '', 7) },
+    { method: 'PATCH', match: /workitems\/40\?/, body: {} },
+  ] });
+  const r = await board.cmdMove({ _: ['move', '40', 'doing'], comment: 'branch x' }, deps);
+  assert.equal(r.out.outcome, 'moved');
+  assert.deepEqual(patches(calls)[0][0], { op: 'test', path: '/rev', value: 7 });
+});
+
+test('move: a revision conflict re-reads and re-plans once, against the fresh revision', async () => {
+  const home = homeWithMap();
+  const { deps, calls } = fakeDeps({ home, routes: [
+    { method: 'GET', match: /workitems\/41\?/, replies: [{ body: wi(41, 'User Story', 'New', '', 3) }, { body: wi(41, 'User Story', 'New', 'frontend', 4) }] },
+    { method: 'PATCH', match: /workitems\/41\?/, replies: [{ status: 412, body: { message: 'precondition failed' } }, { body: {} }] },
+  ] });
+  const r = await board.cmdMove({ _: ['move', '41', 'doing'], comment: 'branch x' }, deps);
+  assert.equal(r.code, 0, JSON.stringify(r.out));
+  assert.equal(r.out.outcome, 'moved');
+  assert.deepEqual(patches(calls).map((p) => p[0].value), [3, 4]);
+});
+
+test('move: after a conflict the fresh read is checked again — idp: and backwards refuse', async () => {
+  const home = homeWithMap();
+  const { deps, calls } = fakeDeps({ home, routes: [
+    { method: 'GET', match: /workitems\/42\?/, replies: [{ body: wi(42, 'User Story', 'New', '', 1) }, { body: wi(42, 'User Story', 'New', 'idp:run', 2) }] },
+    { method: 'GET', match: /workitems\/43\?/, replies: [{ body: wi(43, 'Bug', 'New', '', 1) }, { body: wi(43, 'Bug', 'Closed', '', 2) }] },
+    { method: 'PATCH', match: /workitems\/4[23]\?/, status: 409, body: { message: 'conflict' } },
+  ] });
+  const idp = await board.cmdMove({ _: ['move', '42', 'doing'], comment: 'branch x' }, deps);
+  assert.equal(idp.code, 3);
+  assert.equal(idp.out.code, 'idp');
+  const back = await board.cmdMove({ _: ['move', '43', 'doing'], comment: 'branch x' }, deps);
+  assert.equal(back.code, 3);
+  assert.equal(back.out.code, 'backwards');
+  assert.equal(patches(calls).length, 2);
+});
+
+test('move: a second conflict refuses with a clear message and writes nothing more', async () => {
+  const home = homeWithMap();
+  const { deps, calls } = fakeDeps({ home, routes: [
+    { method: 'GET', match: /workitems\/44\?/, replies: [{ body: wi(44, 'User Story', 'New', '', 1) }, { body: wi(44, 'User Story', 'New', '', 2) }] },
+    { method: 'PATCH', match: /workitems\/44\?/, status: 412, body: { message: 'precondition failed' } },
+  ] });
+  const r = await board.cmdMove({ _: ['move', '44', 'doing'], comment: 'branch x' }, deps);
+  assert.equal(r.code, 3);
+  assert.equal(r.out.outcome, 'conflict');
+  assert.match(r.out.detail, /changed again/);
+  assert.equal(patches(calls).length, 2);
+});
+
+test('reconcile: each PATCH tests the revision the plan read; a conflict re-plans that item', async () => {
+  const home = homeWithMap();
+  const routes = reconcileRoutes({ value: [wi(10, 'User Story', 'New', '', 5), wi(20, 'Task', 'In Progress'), wi(30, 'Bug', 'Active', '', 9)] });
+  routes.unshift(
+    { method: 'GET', match: /workitems\/30\?/, body: wi(30, 'Bug', 'Resolved', '', 10) },
+    { method: 'PATCH', match: /workitems\/30\?/, status: 412, body: { message: 'precondition failed' } },
+  );
+  const { deps, calls } = fakeDeps({ home, routes });
+  const r = await board.cmdReconcile({ _: ['reconcile'] }, deps);
+  assert.deepEqual(patches(calls).map((p) => p[0]), [{ op: 'test', path: '/rev', value: 5 }, { op: 'test', path: '/rev', value: 9 }]);
+  assert.deepEqual(r.out.applied.map((a) => [a.id, a.outcome]), [[10, 'moved'], [30, 'unchanged']]);
+  assert.equal(r.code, 0);
+});
+
+test('reconcile: a type change between read and write refuses — a Bug is never closed past verify', async () => {
+  const home = homeWithMap();
+  const routes = reconcileRoutes({ value: [wi(10, 'User Story', 'New', '', 5), wi(20, 'Task', 'In Progress'), wi(30, 'User Story', 'Active', '', 9)] });
+  routes.unshift(
+    { method: 'GET', match: /workitems\/30\?/, body: wi(30, 'Bug', 'Active', '', 10) },
+    { method: 'PATCH', match: /workitems\/30\?/, status: 412, body: { message: 'precondition failed' } },
+  );
+  const { deps, calls } = fakeDeps({ home, routes });
+  const r = await board.cmdReconcile({ _: ['reconcile'] }, deps);
+  assert.equal(r.out.moves.find((m) => m.id === 30).to, 'done');
+  assert.deepEqual(patches(calls).map((p) => p[0].value), [5, 9]);
+  const a = r.out.applied.find((x) => x.id === 30);
+  assert.equal(a.outcome, 'refused');
+  assert.equal(a.code, 'type-changed');
+  assert.match(a.reason, /User Story → Bug/);
+  assert.equal(r.code, 3);
+});
+
+// --- completed PRs: every page in the interval, or an explicit gap ------------------------
+
+const completedPr = (id, title, closedDate) => ({ pullRequestId: id, title, sourceRefName: `refs/heads/chore-${id}`, closedDate, completionOptions: {} });
+
+test('reconcile: pages through completed PRs inside the interval', async () => {
+  const home = homeWithMap();
+  const routes = reconcileRoutes();
+  const i = routes.findIndex((r) => /pullrequests/.test(String(r.match)));
+  routes[i] = { method: 'GET', match: /repositories\/r1\/pullrequests\?/, body: (u) => {
+    const skip = Number(u.searchParams.get('$skip') || 0);
+    if (skip === 0) return { value: Array.from({ length: 100 }, (_, k) => completedPr(1000 + k, 'chore: tidy', daysAgo(2))) };
+    if (skip === 100) return { value: [completedPr(5, 'fix(30): crash', daysAgo(1))] };
+    return { value: [] };
+  } };
+  routes.push({ method: 'GET', match: /pullRequests\/\d+\/workitems/, body: { value: [] } });
+  const { deps, calls } = fakeDeps({ home, routes });
+  const r = await board.cmdReconcile({ _: ['reconcile'], 'dry-run': true }, deps);
+  assert.deepEqual(r.out.moves.map((m) => m.id), [10, 30]);
+  assert.equal(r.out.coverage.pullRequests.complete, true);
+  assert.equal(r.out.coverage.pullRequests.read, 101);
+  const first = new URL(calls.find((c) => /pullrequests\?/.test(c.url)).url);
+  assert.equal(first.searchParams.get('searchCriteria.queryTimeRangeType'), 'closed');
+  assert.ok(first.searchParams.get('searchCriteria.minTime'));
+});
+
+test('reconcile: says so when it could not read every completed PR in the interval', async () => {
+  const home = homeWithMap();
+  const routes = reconcileRoutes();
+  const i = routes.findIndex((r) => /pullrequests/.test(String(r.match)));
+  routes[i] = { method: 'GET', match: /repositories\/r1\/pullrequests\?/, body: (u) => {
+    const skip = Number(u.searchParams.get('$skip') || 0);
+    return { value: Array.from({ length: 100 }, (_, k) => completedPr(skip + k + 1, 'chore: old', daysAgo(90))) };
+  } };
+  const { deps } = fakeDeps({ home, routes });
+  const r = await board.cmdReconcile({ _: ['reconcile'], 'dry-run': true }, deps);
+  assert.equal(r.out.coverage.pullRequests.complete, false);
+  assert.match(r.out.coverage.pullRequests.warning, /not every completed pull request/i);
+});
+
+// --- the platform runner's contract (ai-sdlc-platform scripts/phase3/states.py, docker/calculator/scenario.py)
+
+const { spawnSync } = require('child_process');
+const CLI = path.join(DIR, 'ado-board.js');
+const scrum = {
+  Epic: [{ name: 'New', category: 'Proposed' }, { name: 'In Progress', category: 'InProgress' }, { name: 'Done', category: 'Completed' }, { name: 'Removed', category: 'Removed' }],
+  Task: [{ name: 'To Do', category: 'Proposed' }, { name: 'In Progress', category: 'InProgress' }, { name: 'Done', category: 'Completed' }, { name: 'Removed', category: 'Removed' }],
+};
+scrum.Feature = scrum.Epic;
+const scrumRoutes = () => [
+  { method: 'GET', match: /workitemtypes\/Product%20Backlog%20Item\/states/, body: json('states-pbi-scrum.json') },
+  ...['Epic', 'Feature', 'Task'].map((t) => ({ method: 'GET', match: new RegExp(`workitemtypes/${t}/states`), body: { value: scrum[t] } })),
+  { method: 'GET', match: /workitemtypes\?/, body: { value: ['Epic', 'Feature', 'Product Backlog Item', 'Task', 'Test Case'].map((name) => ({ name, isDisabled: false })) } },
+];
+
+test('stateMap: todo, doing, verify (the testing state, else Resolved), done per type', () => {
+  const map = { types: {
+    Bug: { targets: { todo: 'New', doing: 'Active', testing: 'Ready for Testing', verify: 'Resolved', done: 'Closed' } },
+    'User Story': { targets: { todo: 'New', doing: 'Active', verify: 'Resolved', done: 'Closed' } },
+    Task: { targets: { todo: 'To Do', doing: 'In Progress', done: 'Done' } },
+  } };
+  assert.deepEqual(L.stateMap(map), {
+    Bug: { todo: 'New', doing: 'Active', verify: 'Ready for Testing', done: 'Closed' },
+    'User Story': { todo: 'New', doing: 'Active', verify: 'Resolved', done: 'Closed' },
+    Task: { todo: 'To Do', doing: 'In Progress', done: 'Done' },
+  });
+});
+
+test('move verify: the testing state for a type with testing and no Resolved state, else Resolved', () => {
+  const map = { types: {
+    PBI: { states: { New: 'todo', Committed: 'doing', 'In Testing': 'testing', Done: 'done' }, targets: { todo: 'New', doing: 'Committed', testing: 'In Testing', done: 'Done' } },
+    Bug: MAP.types.Bug,
+  } };
+  const pbi = L.checkMove({ map, item: item(1, 'PBI', 'Committed'), bucket: 'verify' });
+  assert.deepEqual([pbi.ok, pbi.to, pbi.toState], [true, 'testing', 'In Testing']);
+  const bug = L.checkMove({ map, item: item(2, 'Bug', 'Active'), bucket: 'verify' });
+  assert.deepEqual([bug.ok, bug.to, bug.toState], [true, 'verify', 'Resolved']);
+});
+
+test('reconcile: an idp: card is a skip with reason idp-owned', () => {
+  const plan = L.planReconcile({ map: MAP, now: NOW, branches: [{ name: 'feature/ADO-50-x', ahead: 1, date: daysAgo(0) }], items: items(item(50, 'User Story', 'New', { tags: 'idp:owner' })) });
+  assert.deepEqual(plan.moves, []);
+  assert.deepEqual([plan.skipped[0].code, plan.skipped[0].reason], ['idp', 'idp-owned']);
+});
+
+test('states discover: without --types finds Epic, Feature, the PBI type and Task; answers stateMap and types', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'adoboard-'));
+  const { deps } = fakeDeps({ routes: scrumRoutes(), home });
+  const r = await board.cmdDiscover({ _: [], json: true, 'non-interactive': true, choose: ['Product Backlog Item:todo=New'] }, deps);
+  assert.equal(r.code, 0);
+  assert.deepEqual(Object.keys(r.out.stateMap).sort(), ['Epic', 'Feature', 'Product Backlog Item', 'Task']);
+  assert.deepEqual(r.out.stateMap.Task, { todo: 'To Do', doing: 'In Progress', done: 'Done' });
+  assert.equal(r.out.stateMap['Product Backlog Item'].todo, 'New');
+  assert.equal(r.out.types.Task.done, 'Done');
+});
+
+test('move: --allow-idp moves an idp: card; without it the move is refused, non-zero', async () => {
+  const home = homeWithMap();
+  const { deps, calls } = fakeDeps({ home, routes: [
+    { method: 'GET', match: /workitems\/32\?/, body: wi(32, 'User Story', 'New', 'idp:owner') },
+    { method: 'PATCH', match: /workitems\/32\?/, body: {} },
+  ] });
+  const no = await board.cmdMove({ _: ['move', '32', 'doing'], comment: 'x', json: true }, deps);
+  assert.deepEqual([no.code, no.out.outcome, no.out.code], [3, 'refused', 'idp']);
+  assert.equal(calls.filter((c) => c.method === 'PATCH').length, 0);
+  const ok = await board.cmdMove({ _: ['move', '32', 'doing'], comment: 'x', 'allow-idp': true, json: true }, deps);
+  assert.deepEqual([ok.code, ok.out.outcome], [0, 'moved']);
+});
+
+// Runs ado-board.js as the runner does — a child process, argv copied from the runner — with
+// fetch stubbed by a preload and a scratch git repository; stdout must parse as JSON.
+function runCli(argv, { routes, home, cwd }) {
+  const stub = path.join(home, 'stub-fetch.js');
+  fs.writeFileSync(stub, `'use strict';
+const routes = ${JSON.stringify(routes.map((r) => ({ ...r, match: r.match.source })))};
+globalThis.fetch = async (url, init) => {
+  const r = routes.find((x) => x.method === init.method && new RegExp(x.match).test(url));
+  const status = r ? (r.status || 200) : 404;
+  const body = JSON.stringify(r ? r.body : {});
+  return { ok: status < 400, status, text: async () => body, headers: { get: () => 'application/json' } };
 };
 `);
-
-  const result = spawnSync('node', [SCRIPT, 'move', '14', 'doing', '--allow-idp', '--json'], {
-    cwd,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      ENGCAT_HOME: home,
-      PATH: `${bin}:${process.env.PATH}`,
-      NODE_OPTIONS: `--require ${mockFetch}`,
-    },
-  });
-
-  assert.equal(result.status, 0, result.stderr);
-  const parsed = JSON.parse(result.stdout);
-  assert.equal(parsed.ok, true);
-  assert.equal(parsed.to, 'doing');
-});
-
-test('resolveAdoContext derives Azure context from origin and refuses config or state mismatches', () => {
-  const { repo } = createRepo();
-  git(repo, 'remote', 'set-url', 'origin', 'https://hanwha@dev.azure.com/hanwha/Catalog/_git/engineering-catalog');
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ado-home-'));
-
-  writeAdoConfig(home, 'https://dev.azure.com/hanwha', 'Catalog');
-  const context = resolveAdoContext({
-    env: { ...process.env, ENGCAT_HOME: home },
-    cwd: repo,
-    state: { organization: 'https://dev.azure.com/hanwha', project: 'Catalog' },
-  });
-  assert.equal(context.organization, 'https://dev.azure.com/hanwha');
-  assert.equal(context.project, 'Catalog');
-  assert.equal(context.repository, 'engineering-catalog');
-
-  writeAdoConfig(home, 'https://dev.azure.com/hal-tss', 'Catalog');
-  assert.throws(() => resolveAdoContext({
-    env: { ...process.env, ENGCAT_HOME: home },
-    cwd: repo,
-  }), /repository origin/);
-  writeAdoConfig(home, 'https://dev.azure.com/hanwha', 'Catalog');
-  assert.throws(() => resolveAdoContext({
-    env: { ...process.env, ENGCAT_HOME: home },
-    cwd: repo,
-    state: { organization: 'https://dev.azure.com/hal-tss', project: 'Catalog' },
-  }), /state file/);
-});
-
-test('reconcile --allow-unconfigured exits before any auth or git context work', () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'ado-board-no-state-'));
-  const fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), 'ado-board-bin-'));
-  const marker = path.join(cwd, 'az-called');
-  fs.writeFileSync(path.join(fakeBin, 'az'), `#!/bin/sh\necho called > "${marker}"\nexit 42\n`);
-  fs.chmodSync(path.join(fakeBin, 'az'), 0o755);
-
-  const result = spawnSync('node', [SCRIPT, 'reconcile', '--allow-unconfigured', '--json'], {
-    cwd,
-    encoding: 'utf8',
-    env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` },
-  });
-
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), {
-    ok: true,
-    command: 'reconcile',
-    skipped: 'state-map-missing',
-  });
-  assert.equal(fs.existsSync(marker), false);
-});
-
-test('reconcile uses master when the repository base branch is not main', async () => {
-  const { repo } = createRepo('master');
-  createPushedBranch(repo, 'feature/ADO-101-catalog-sync', 'feature.txt', 'feature work');
-  git(repo, 'fetch', 'origin');
-
-  const transport = new FakeTransport({
-    items: {
-      101: {
-        id: 101,
-        rev: 1,
-        fields: {
-          'System.WorkItemType': 'Product Backlog Item',
-          'System.State': 'New',
-          'System.Tags': '',
-          'System.Title': 'Track pushed work',
-        },
-      },
-    },
-  });
-
-  const result = await reconcileBoard({
-    transport,
-    context: {},
-    stateMap: createStateMap(),
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-  });
-
-  assert.deepEqual(result.changed.map((entry) => entry.id), ['101']);
-});
-
-test('reconcile reports base-not-found when no remote base can be resolved', async () => {
-  const { repo } = createRepo('trunk');
-  git(repo, 'fetch', 'origin');
-  createPushedBranch(repo, 'feature/ADO-101-catalog-sync', 'feature.txt', 'feature work');
-  git(repo, 'update-ref', '-d', 'refs/remotes/origin/HEAD');
-
-  const result = await reconcileBoard({
-    transport: new FakeTransport(),
-    context: {},
-    stateMap: createStateMap(),
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-  });
-
-  assert.deepEqual(result.changed, []);
-  assert.equal(result.report.warnings[0].code, 'base-not-found');
-});
-
-test('reconcile records per-item skips, keeps earlier moves, maps alternate states, and falls back from verify to done', async () => {
-  const { repo } = createRepo();
-  createPushedBranch(repo, 'feature/ADO-101-catalog-sync', 'one.txt', 'one');
-  createPushedBranch(repo, 'feature/ADO-202-approved-work', 'two.txt', 'two');
-  git(repo, 'fetch', 'origin');
-
-  const transport = new FakeTransport({
-    items: {
-      101: {
-        id: 101,
-        rev: 1,
-        fields: {
-          'System.WorkItemType': 'Product Backlog Item',
-          'System.State': 'New',
-          'System.Tags': '',
-          'System.Title': 'Todo item',
-        },
-      },
-      202: {
-        id: 202,
-        rev: 1,
-        fields: {
-          'System.WorkItemType': 'Product Backlog Item',
-          'System.State': 'Approved',
-          'System.Tags': '',
-          'System.Title': 'Approved item',
-        },
-      },
-      303: {
-        id: 303,
-        rev: 4,
-        fields: {
-          'System.WorkItemType': 'Bug',
-          'System.State': 'Active',
-          'System.Tags': '',
-          'System.Title': 'Bug without verify state',
-        },
-      },
-      505: {
-        id: 505,
-        rev: 9,
-        fields: {
-          'System.WorkItemType': 'Bug',
-          'System.State': 'Closed',
-          'System.Tags': '',
-          'System.Title': 'Already done bug',
-        },
-      },
-      606: {
-        id: 606,
-        rev: 1,
-        fields: {
-          'System.WorkItemType': 'Product Backlog Item',
-          'System.State': 'Removed',
-          'System.Tags': '',
-          'System.Title': 'Removed item',
-        },
-      },
-      707: {
-        id: 707,
-        rev: 1,
-        fields: {
-          'System.WorkItemType': 'Product Backlog Item',
-          'System.State': 'Custom',
-          'System.Tags': '',
-          'System.Title': 'Unknown state item',
-        },
-      },
-    },
-    getErrors: {
-      404: httpError(404, 'Not found'),
-    },
-    prs: [
-      {
-        pullRequestId: 1,
-        sourceRefName: 'refs/heads/bug/ADO-303-awaiting-verification',
-        targetRefName: 'refs/heads/main',
-        closedDate: '2026-10-12T12:00:00.000Z',
-        workItemRefs: [{ id: 303 }],
-      },
-      {
-        pullRequestId: 2,
-        sourceRefName: 'refs/heads/bug/ADO-505-already-closed',
-        targetRefName: 'refs/heads/main',
-        closedDate: '2026-10-12T12:05:00.000Z',
-        workItemRefs: [{ id: 505 }],
-      },
-      {
-        pullRequestId: 3,
-        sourceRefName: 'refs/heads/feature/ADO-606-removed',
-        targetRefName: 'refs/heads/main',
-        closedDate: '2026-10-12T12:10:00.000Z',
-        workItemRefs: [{ id: 606 }],
-      },
-      {
-        pullRequestId: 4,
-        sourceRefName: 'refs/heads/feature/ADO-404-missing',
-        targetRefName: 'refs/heads/main',
-        closedDate: '2026-10-12T12:15:00.000Z',
-        workItemRefs: [{ id: 404 }, { id: 707 }],
-      },
-    ],
-  });
-
-  const result = await reconcileBoard({
-    transport,
-    context: {},
-    stateMap: createStateMap(),
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-  });
-
-  assert.deepEqual(result.changed.map((entry) => ({ id: entry.id, to: entry.to })), [
-    { id: '101', to: 'doing' },
-    { id: '202', to: 'doing' },
-    { id: '303', to: 'done' },
-  ]);
-  assert.equal(transport.items.get('101').fields['System.State'], 'Committed');
-  assert.equal(transport.items.get('202').fields['System.State'], 'Committed');
-  assert.equal(transport.items.get('303').fields['System.State'], 'Closed');
-  assert.deepEqual(result.skipped.map((entry) => entry.reason).sort(), [
-    'noop',
-    'removed',
-    'state-unmapped',
-    'work-item-missing',
-  ]);
-});
-
-test('reconcile reports branch-loop getWorkItem 500 as move-error', async () => {
-  const { repo } = createRepo();
-  createPushedBranch(repo, 'feature/ADO-101-catalog-sync', 'one.txt', 'one');
-  git(repo, 'fetch', 'origin');
-
-  const result = await reconcileBoard({
-    transport: new FakeTransport({
-      getErrors: { 101: httpError(500, 'server exploded') },
-    }),
-    context: {},
-    stateMap: createStateMap(),
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-  });
-
-  assert.equal(result.skipped[0].reason, 'move-error');
-});
-
-test('reconcile does not replay a completed PR onto an item changed after the PR closed', async () => {
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-
-  const transport = new FakeTransport({
-    items: {
-      303: {
-        id: 303,
-        rev: 6,
-        fields: {
-          'System.WorkItemType': 'Product Backlog Item',
-          'System.State': 'Committed',
-          'System.Tags': '',
-          'System.Title': 'Human reopened item',
-          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-12T14:00:00.000Z',
-          'System.ChangedDate': '2026-10-12T14:00:00.000Z',
-        },
-      },
-    },
-    updates: {
-      303: [{
-        revisedDate: '2026-10-12T14:00:00.000Z',
-        revisedBy: { displayName: 'QA Engineer' },
-        fields: {
-          'System.State': { newValue: 'Committed' },
-          'System.History': { newValue: 'QA reopened after verification failed.' },
-        },
-      }],
-    },
-    prs: [{
-      pullRequestId: 55,
-      sourceRefName: 'refs/heads/feature/ADO-303-human-reopen',
-      targetRefName: 'refs/heads/main',
-      creationDate: '2026-10-10T09:00:00.000Z',
-      closedDate: '2026-10-12T13:00:00.000Z',
-      workItemRefs: [{ id: 303 }],
-    }],
-  });
-
-  const result = await reconcileBoard({
-    transport,
-    context: {},
-    stateMap: createStateMap(),
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-  });
-
-  assert.deepEqual(result.changed, []);
-  assert.equal(result.skipped[0].reason, 'pr-replayed-after-manual-change');
-  assert.equal(transport.items.get('303').fields['System.State'], 'Committed');
-});
-
-test('reconcile does not replay a branch onto an item moved back to todo after the branch commit', async () => {
-  const { repo } = createRepo();
-  createPushedBranch(repo, 'feature/ADO-101-catalog-sync', 'feature.txt', 'feature work');
-  git(repo, 'fetch', 'origin');
-  const branchCommittedAt = git(repo, 'for-each-ref', '--format=%(committerdate:iso-strict)', 'refs/remotes/origin/feature/ADO-101-catalog-sync');
-
-  const transport = new FakeTransport({
-    items: {
-      101: {
-        id: 101,
-        rev: 2,
-        fields: {
-          'System.WorkItemType': 'Product Backlog Item',
-          'System.State': 'New',
-          'System.Tags': '',
-          'System.Title': 'Human moved it back to todo',
-          'Microsoft.VSTS.Common.StateChangeDate': new Date(new Date(branchCommittedAt).getTime() + 60000).toISOString(),
-          'System.ChangedDate': new Date(new Date(branchCommittedAt).getTime() + 60000).toISOString(),
-        },
-      },
-    },
-    updates: {
-      101: [{
-        revisedDate: new Date(new Date(branchCommittedAt).getTime() + 60000).toISOString(),
-        revisedBy: { displayName: 'Product Owner' },
-        fields: {
-          'System.State': { newValue: 'New' },
-          'System.History': { newValue: 'Moved back to todo while scope changed.' },
-        },
-      }],
-    },
-  });
-
-  const result = await reconcileBoard({
-    transport,
-    context: {},
-    stateMap: createStateMap(),
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-  });
-
-  assert.deepEqual(result.changed, []);
-  assert.equal(result.skipped[0].reason, 'branch-replayed-after-manual-change');
-  assert.equal(transport.items.get('101').fields['System.State'], 'New');
-});
-
-test('reconcile records processed pull requests and does not reapply them after a reopen', async () => {
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-  const initialState = {
-    version: 1,
-    organization: 'https://dev.azure.com/example',
-    project: 'Catalog',
-    stateMap: createStateMap(),
-  };
-  const stateFile = createStateFile(repo, initialState);
-
-  const transport = new FakeTransport({
-    items: {
-      303: {
-        id: 303,
-        rev: 5,
-        fields: {
-          'System.WorkItemType': 'Bug',
-          'System.State': 'Active',
-          'System.Tags': '',
-          'System.Title': 'Awaiting verification',
-        },
-      },
-    },
-    prs: [{
-      pullRequestId: 55,
-      sourceRefName: 'refs/heads/bug/ADO-303-awaiting-verification',
-      targetRefName: 'refs/heads/main',
-      closedDate: '2026-10-12T13:00:00.000Z',
-      workItemRefs: [{ id: 303 }],
-    }],
-  });
-
-  const first = await reconcileBoard({
-    transport,
-    context: {},
-    stateMap: initialState.stateMap,
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-    stateFile,
-    projectState: initialState,
-  });
-  assert.deepEqual(first.changed.map((entry) => entry.id), ['303']);
-
-  const saved = loadProjectState(stateFile);
-  assert.equal(saved.reconcile.processedPullRequests.length, 1);
-  transport.items.get('303').fields['System.State'] = 'Active';
-
-  const second = await reconcileBoard({
-    transport,
-    context: {},
-    stateMap: saved.stateMap,
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-    stateFile,
-    projectState: saved,
-  });
-
-  assert.deepEqual(second.changed, []);
-  assert.equal(transport.items.get('303').fields['System.State'], 'Active');
-});
-
-test('reconcile does not treat its own branch move as a manual reopen before the completed PR move', async () => {
-  const { repo } = createRepo();
-  createPushedBranch(repo, 'feature/ADO-5-squash-merge', 'feature.txt', 'feature work');
-  git(repo, 'fetch', 'origin');
-
-  const transport = new FakeTransport({
-    items: {
-      5: {
-        id: 5,
-        rev: 1,
-        fields: {
-          'System.WorkItemType': 'Product Backlog Item',
-          'System.State': 'New',
-          'System.Tags': '',
-          'System.Title': 'Squash merged item',
-          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-12T13:00:00.000Z',
-          'System.ChangedDate': '2026-10-12T13:00:00.000Z',
-        },
-      },
-    },
-    prs: [{
-      pullRequestId: 10,
-      sourceRefName: 'refs/heads/feature/ADO-5-squash-merge',
-      targetRefName: 'refs/heads/main',
-      creationDate: '2026-10-12T13:00:00.000Z',
-      closedDate: '2026-10-12T14:00:00.000Z',
-      workItemRefs: [{ id: 5 }],
-    }],
-    moveTimestamp: '2026-10-12T15:00:00.000Z',
-  });
-
-  const result = await reconcileBoard({
-    transport,
-    context: {},
-    stateMap: createStateMap(),
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-    projectState: { stateMap: createStateMap() },
-  });
-
-  assert.deepEqual(result.changed.map((entry) => ({ id: entry.id, to: entry.to })), [
-    { id: '5', to: 'doing' },
-    { id: '5', to: 'done' },
-  ]);
-  assert.equal(transport.items.get('5').fields['System.State'], 'Done');
-});
-
-test('reconcile does not treat a prior ado-board branch move as a manual reopen on a later run', async () => {
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-  const initialState = {
-    version: 1,
-    organization: 'https://dev.azure.com/example',
-    project: 'Catalog',
-    stateMap: createStateMap(),
-  };
-  const stateFile = createStateFile(repo, initialState);
-
-  const transport = new FakeTransport({
-    items: {
-      5: {
-        id: 5,
-        rev: 2,
-        fields: {
-          'System.WorkItemType': 'Product Backlog Item',
-          'System.State': 'Committed',
-          'System.Tags': '',
-          'System.Title': 'Already doing from ado-board',
-          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-12T15:00:00.000Z',
-          'System.ChangedDate': '2026-10-12T15:00:00.000Z',
-        },
-      },
-    },
-    updates: {
-      5: [{
-        revisedDate: '2026-10-12T15:00:00.000Z',
-        revisedBy: { displayName: 'ado-board reconcile' },
-        fields: {
-          'System.State': { newValue: 'Committed' },
-          'System.History': { newValue: 'ado-board: moved to doing after pushed work on feature/ADO-5-squash-merge (1234567).' },
-        },
-      }],
-    },
-    prs: [{
-      pullRequestId: 10,
-      sourceRefName: 'refs/heads/feature/ADO-5-squash-merge',
-      targetRefName: 'refs/heads/main',
-      creationDate: '2026-10-12T13:00:00.000Z',
-      closedDate: '2026-10-12T14:00:00.000Z',
-      workItemRefs: [{ id: 5 }],
-    }],
-  });
-
-  const result = await reconcileBoard({
-    transport,
-    context: {},
-    stateMap: initialState.stateMap,
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-    stateFile,
-    projectState: initialState,
-  });
-
-  assert.deepEqual(result.changed.map((entry) => ({ id: entry.id, to: entry.to })), [
-    { id: '5', to: 'done' },
-  ]);
-  assert.equal(transport.items.get('5').fields['System.State'], 'Done');
-});
-
-test('reconcile filters completed PRs to the repo base branch and only asks for newer ones', async () => {
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-  git(repo, 'remote', 'set-url', 'origin', 'https://dev.azure.com/example/Catalog/_git/engineering-catalog');
-  const transport = new FakeTransport({
-    items: {
-      101: {
-        id: 101,
-        rev: 1,
-        fields: {
-          'System.WorkItemType': 'Product Backlog Item',
-          'System.State': 'Committed',
-          'System.Tags': '',
-          'System.Title': 'Should stay doing',
-          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-01T00:00:00.000Z',
-          'System.ChangedDate': '2026-10-01T00:00:00.000Z',
-        },
-      },
-    },
-    prs: [
-      {
-        pullRequestId: 1,
-        sourceRefName: 'refs/heads/feature/ADO-101-catalog-sync',
-        targetRefName: 'refs/heads/release/1.0',
-        creationDate: '2026-10-12T08:00:00.000Z',
-        closedDate: '2026-10-12T10:00:00.000Z',
-        workItemRefs: [{ id: 101 }],
-      },
-      {
-        pullRequestId: 2,
-        sourceRefName: 'refs/heads/feature/ADO-101-catalog-sync',
-        targetRefName: 'refs/heads/main',
-        creationDate: '2026-10-01T08:00:00.000Z',
-        closedDate: '2026-10-12T09:00:00.000Z',
-        workItemRefs: [{ id: 101 }],
-      },
-      {
-        pullRequestId: 3,
-        sourceRefName: 'refs/heads/feature/ADO-101-catalog-sync',
-        targetRefName: 'refs/heads/main',
-        creationDate: '2026-10-01T08:00:00.000Z',
-        closedDate: '2026-10-12T10:00:00.000Z',
-        workItemRefs: [{ id: 101 }],
-      },
-    ],
-  });
-
-  const result = await reconcileBoard({
-    transport,
-    context: {},
-    stateMap: createStateMap(),
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-    projectState: {
-      stateMap: createStateMap(),
-      reconcile: { processedPullRequests: [], lastCompletedPrClosedDate: '2026-10-12T09:30:00.000Z' },
-    },
-  });
-
-  assert.deepEqual(result.changed.map((entry) => entry.id), ['101']);
-  assert.deepEqual(transport.prQueries[0], {
-    repository: 'engineering-catalog',
-    targetRefName: 'refs/heads/main',
-    minTime: '2026-10-12T09:30:00.000Z',
-    queryTimeRangeType: 'closed',
-    maxPages: 2,
-  });
-});
-
-test('reconcile reports verify items separately from stale doing work', async () => {
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-  const transport = new FakeTransport({
-    items: {
-      111: {
-        id: 111,
-        rev: 1,
-        fields: {
-          'System.WorkItemType': 'Product Backlog Item',
-          'System.State': 'Committed',
-          'System.Tags': '',
-          'System.Title': 'Doing item',
-        },
-      },
-      222: {
-        id: 222,
-        rev: 1,
-        fields: {
-          'System.WorkItemType': 'Task',
-          'System.State': 'Resolved',
-          'System.Tags': '',
-          'System.Title': 'Waiting for QA',
-        },
-      },
-    },
-    activeIds: [111, 222],
-  });
-
-  const result = await reconcileBoard({
-    transport,
-    context: {},
-    stateMap: createStateMap(),
-    cwd: repo,
-    staleDays: 0,
-    throttleHours: 0,
-  });
-
-  assert.deepEqual(result.report.doingWithNoPushedCommit.map((entry) => entry.id), ['111']);
-  assert.deepEqual(result.report.verifyWaitingForQa.map((entry) => entry.id), ['222']);
-});
-
-test('reconcile writes the throttle stamp only after a successful run', async () => {
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ado-board-home-'));
-  const env = { ...process.env, ENGCAT_HOME: home };
-  const failing = new FakeTransport({
-    listPrError: new Error('network down'),
-  });
-
-  await assert.rejects(() => reconcileBoard({
-    transport: failing,
-    context: {},
-    stateMap: createStateMap(),
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 12,
-    env,
-  }), /network down/);
-
-  assert.equal(fs.existsSync(path.join(home, '.engineering-catalog', 'ado-board-reconcile.json')), false);
-
-  const passing = new FakeTransport();
-  const first = await reconcileBoard({
-    transport: passing,
-    context: {},
-    stateMap: createStateMap(),
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 12,
-    env,
-  });
-  assert.equal(first.throttled, false);
-
-  const second = await reconcileBoard({
-    transport: passing,
-    context: {},
-    stateMap: createStateMap(),
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 12,
-    env,
-  });
-  assert.equal(second.throttled, true);
-});
-
-test('reconcile retries a completed PR after a transient move error instead of marking it processed', async () => {
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-  const initialState = {
-    version: 1,
-    organization: 'https://dev.azure.com/example',
-    project: 'Catalog',
-    stateMap: createStateMap(),
-  };
-  const stateFile = createStateFile(repo, initialState);
-  const retryable = httpError(500, 'server exploded');
-
-  const firstTransport = new FakeTransport({
-    items: {
-      303: {
-        id: 303,
-        rev: 5,
-        fields: {
-          'System.WorkItemType': 'Product Backlog Item',
-          'System.State': 'Committed',
-          'System.Tags': '',
-          'System.Title': 'Retryable item',
-          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-01T00:00:00.000Z',
-          'System.ChangedDate': '2026-10-01T00:00:00.000Z',
-        },
-      },
-    },
-    failMoveById: { 303: retryable },
-    prs: [{
-      pullRequestId: 55,
-      sourceRefName: 'refs/heads/feature/ADO-303-retryable',
-      targetRefName: 'refs/heads/main',
-      creationDate: '2026-10-10T09:00:00.000Z',
-      closedDate: '2026-10-12T13:00:00.000Z',
-      workItemRefs: [{ id: 303 }],
-    }],
-  });
-
-  const first = await reconcileBoard({
-    transport: firstTransport,
-    context: {},
-    stateMap: initialState.stateMap,
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-    stateFile,
-    projectState: initialState,
-  });
-  assert.equal(first.skipped[0].reason, 'move-error');
-  const savedAfterFirst = loadProjectState(stateFile);
-  assert.equal(savedAfterFirst.reconcile.retryablePullRequests[0].pullRequestId, '55');
-
-  const secondTransport = new FakeTransport({
-    items: {
-      303: {
-        id: 303,
-        rev: 5,
-        fields: {
-          'System.WorkItemType': 'Product Backlog Item',
-          'System.State': 'Committed',
-          'System.Tags': '',
-          'System.Title': 'Retryable item',
-          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-01T00:00:00.000Z',
-          'System.ChangedDate': '2026-10-01T00:00:00.000Z',
-        },
-      },
-    },
-    prs: [{
-      pullRequestId: 55,
-      sourceRefName: 'refs/heads/feature/ADO-303-retryable',
-      targetRefName: 'refs/heads/main',
-      creationDate: '2026-10-10T09:00:00.000Z',
-      closedDate: '2026-10-12T13:00:00.000Z',
-      workItemRefs: [{ id: 303 }],
-    }],
-  });
-
-  const second = await reconcileBoard({
-    transport: secondTransport,
-    context: {},
-    stateMap: initialState.stateMap,
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-    stateFile,
-    projectState: initialState,
-  });
-  assert.deepEqual(second.changed.map((entry) => entry.id), ['303']);
-});
-
-test('reconcile keeps retryable older PRs queryable even after a later PR succeeds', async () => {
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-  const initialState = {
-    version: 1,
-    organization: 'https://dev.azure.com/example',
-    project: 'Catalog',
-    stateMap: createStateMap(),
-  };
-  const stateFile = createStateFile(repo, initialState);
-  const retryable = httpError(500, 'server exploded');
-
-  const firstTransport = new FakeTransport({
-    items: {
-      1: {
-        id: 1,
-        rev: 1,
-        fields: {
-          'System.WorkItemType': 'Product Backlog Item',
-          'System.State': 'Committed',
-          'System.Tags': '',
-          'System.Title': 'Older retryable PR',
-          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-01T00:00:00.000Z',
-          'System.ChangedDate': '2026-10-01T00:00:00.000Z',
-        },
-      },
-      2: {
-        id: 2,
-        rev: 1,
-        fields: {
-          'System.WorkItemType': 'Product Backlog Item',
-          'System.State': 'Committed',
-          'System.Tags': '',
-          'System.Title': 'Later successful PR',
-          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-01T00:00:00.000Z',
-          'System.ChangedDate': '2026-10-01T00:00:00.000Z',
-        },
-      },
-    },
-    failMoveById: { 1: retryable },
-    prs: [
-      {
-        pullRequestId: 1,
-        sourceRefName: 'refs/heads/feature/ADO-1-retry',
-        targetRefName: 'refs/heads/main',
-        creationDate: '2026-10-10T09:00:00.000Z',
-        closedDate: '2026-10-12T10:00:00.000Z',
-        workItemRefs: [{ id: 1 }],
-      },
-      {
-        pullRequestId: 2,
-        sourceRefName: 'refs/heads/feature/ADO-2-success',
-        targetRefName: 'refs/heads/main',
-        creationDate: '2026-10-10T09:00:00.000Z',
-        closedDate: '2026-10-12T11:00:00.000Z',
-        workItemRefs: [{ id: 2 }],
-      },
-    ],
-  });
-
-  await reconcileBoard({
-    transport: firstTransport,
-    context: {},
-    stateMap: initialState.stateMap,
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-    stateFile,
-    projectState: initialState,
-  });
-
-  const saved = loadProjectState(stateFile);
-  assert.equal(saved.reconcile.lastCompletedPrClosedDate, null);
-  assert.equal(saved.reconcile.retryablePullRequests[0].pullRequestId, '1');
-
-  const secondTransport = new FakeTransport({
-    items: {
-      1: {
-        id: 1,
-        rev: 1,
-        fields: {
-          'System.WorkItemType': 'Product Backlog Item',
-          'System.State': 'Committed',
-          'System.Tags': '',
-          'System.Title': 'Older retryable PR',
-          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-01T00:00:00.000Z',
-          'System.ChangedDate': '2026-10-01T00:00:00.000Z',
-        },
-      },
-    },
-    prs: [{
-      pullRequestId: 1,
-      sourceRefName: 'refs/heads/feature/ADO-1-retry',
-      targetRefName: 'refs/heads/main',
-      creationDate: '2026-10-10T09:00:00.000Z',
-      closedDate: '2026-10-12T10:00:00.000Z',
-      workItemRefs: [{ id: 1 }],
-    }],
-  });
-
-  const second = await reconcileBoard({
-    transport: secondTransport,
-    context: {},
-    stateMap: initialState.stateMap,
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-    stateFile,
-    projectState: saved,
-  });
-
-  assert.deepEqual(second.changed.map((entry) => entry.id), ['1']);
-  assert.equal(secondTransport.prQueries[0].minTime, '2026-10-12T10:00:00.000Z');
-});
-
-test('reconcile retries a PR when getWorkItem fails with 500 in the completed-pr loop', async () => {
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-  const initialState = {
-    version: 1,
-    organization: 'https://dev.azure.com/example',
-    project: 'Catalog',
-    stateMap: createStateMap(),
-  };
-  const stateFile = createStateFile(repo, initialState);
-
-  const firstTransport = new FakeTransport({
-    getErrors: { 303: httpError(500, 'server exploded') },
-    prs: [{
-      pullRequestId: 55,
-      sourceRefName: 'refs/heads/feature/ADO-303-retryable',
-      targetRefName: 'refs/heads/main',
-      creationDate: '2026-10-10T09:00:00.000Z',
-      closedDate: '2026-10-12T13:00:00.000Z',
-      workItemRefs: [{ id: 303 }],
-    }],
-  });
-
-  const first = await reconcileBoard({
-    transport: firstTransport,
-    context: {},
-    stateMap: initialState.stateMap,
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-    stateFile,
-    projectState: initialState,
-  });
-  assert.equal(first.skipped[0].reason, 'move-error');
-
-  const saved = loadProjectState(stateFile);
-  assert.equal(saved.reconcile.retryablePullRequests[0].pullRequestId, '55');
-
-  const secondTransport = new FakeTransport({
-    items: {
-      303: {
-        id: 303,
-        rev: 5,
-        fields: {
-          'System.WorkItemType': 'Product Backlog Item',
-          'System.State': 'Committed',
-          'System.Tags': '',
-          'System.Title': 'Retryable item',
-          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-01T00:00:00.000Z',
-          'System.ChangedDate': '2026-10-01T00:00:00.000Z',
-        },
-      },
-    },
-    prs: [{
-      pullRequestId: 55,
-      sourceRefName: 'refs/heads/feature/ADO-303-retryable',
-      targetRefName: 'refs/heads/main',
-      creationDate: '2026-10-10T09:00:00.000Z',
-      closedDate: '2026-10-12T13:00:00.000Z',
-      workItemRefs: [{ id: 303 }],
-    }],
-  });
-
-  const second = await reconcileBoard({
-    transport: secondTransport,
-    context: {},
-    stateMap: initialState.stateMap,
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-    stateFile,
-    projectState: saved,
-  });
-
-  assert.deepEqual(second.changed.map((entry) => entry.id), ['303']);
-});
-
-test('reconcile keeps the prior completed-PR watermark when the PR list is truncated', async () => {
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-  const initialState = {
-    version: 1,
-    organization: 'https://dev.azure.com/example',
-    project: 'Catalog',
-    stateMap: createStateMap(),
-    reconcile: {
-      lastCompletedPrClosedDate: '2026-10-01T00:00:00.000Z',
-      processedPullRequests: [{
-        key: 'engineering-catalog::1::refs/heads/main::2026-10-01T00:00:00.000Z',
-        pullRequestId: '1',
-        repository: 'engineering-catalog',
-        targetRefName: 'refs/heads/main',
-        sourceRefName: 'refs/heads/feature/ADO-1-older',
-        closedDate: '2026-10-01T00:00:00.000Z',
-        workItemIds: ['1'],
-      }],
-    },
-  };
-  const stateFile = createStateFile(repo, initialState);
-  class TruncatedTransport extends FakeTransport {
-    async listCompletedPullRequests(_context, options = {}) {
-      const rows = await super.listCompletedPullRequests(_context, options);
-      rows.truncated = true;
-      return rows;
-    }
-  }
-
-  const transport = new TruncatedTransport({
-    items: {
-      303: {
-        id: 303,
-        rev: 5,
-        fields: {
-          'System.WorkItemType': 'Bug',
-          'System.State': 'Active',
-          'System.Tags': '',
-          'System.Title': 'Truncated PR scan item',
-        },
-      },
-    },
-    prs: [{
-      pullRequestId: 55,
-      sourceRefName: 'refs/heads/bug/ADO-303-newer-window',
-      targetRefName: 'refs/heads/main',
-      creationDate: '2026-10-12T09:00:00.000Z',
-      closedDate: '2026-10-12T13:00:00.000Z',
-      workItemRefs: [{ id: 303 }],
-    }],
-  });
-
-  await reconcileBoard({
-    transport,
-    context: {},
-    stateMap: initialState.stateMap,
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-    stateFile,
-    projectState: initialState,
-  });
-
-  const saved = loadProjectState(stateFile);
-  assert.equal(saved.reconcile.lastCompletedPrClosedDate, '2026-10-01T00:00:00.000Z');
-  assert.equal(saved.reconcile.processedPullRequests.length, 2);
-});
-
-test('reconcile retains the first-run lower bound when the completed-PR list is truncated', async () => {
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-  const initialState = {
-    version: 1,
-    organization: 'https://dev.azure.com/example',
-    project: 'Catalog',
-    stateMap: createStateMap(),
-  };
-  const stateFile = createStateFile(repo, initialState);
-  class TruncatedTransport extends FakeTransport {
-    async listCompletedPullRequests(_context, options = {}) {
-      const rows = await super.listCompletedPullRequests(_context, options);
-      rows.truncated = true;
-      return rows;
-    }
-  }
-
-  const RealDate = global.Date;
-  const FixedDate = class extends RealDate {
-    constructor(...args) {
-      if (args.length === 0) {
-        super('2026-10-13T12:00:00.000Z');
-        return;
-      }
-      super(...args);
-    }
-    static now() {
-      return new RealDate('2026-10-13T12:00:00.000Z').getTime();
-    }
-  };
-  global.Date = FixedDate;
-  try {
-    const transport = new TruncatedTransport({
-      items: {
-        303: {
-          id: 303,
-          rev: 5,
-          fields: {
-            'System.WorkItemType': 'Bug',
-            'System.State': 'Active',
-            'System.Tags': '',
-            'System.Title': 'Truncated first-run item',
-          },
-        },
-      },
-      prs: [{
-        pullRequestId: 55,
-        sourceRefName: 'refs/heads/bug/ADO-303-first-run-truncated',
-        targetRefName: 'refs/heads/main',
-        creationDate: '2026-10-12T09:00:00.000Z',
-        closedDate: '2026-10-12T13:00:00.000Z',
-        workItemRefs: [{ id: 303 }],
-      }],
-    });
-
-    await reconcileBoard({
-      transport,
-      context: {},
-      stateMap: initialState.stateMap,
-      cwd: repo,
-      staleDays: 30,
-      throttleHours: 0,
-      stateFile,
-      projectState: initialState,
-    });
-    const saved = loadProjectState(stateFile);
-    assert.equal(saved.reconcile.queryMinTime, '2026-09-29T12:00:00.000Z');
-    assert.equal(transport.prQueries[0].minTime, '2026-09-29T12:00:00.000Z');
-  } finally {
-    global.Date = RealDate;
-  }
-});
-
-test('reconcile does not mark a PR processed when fetching its work-item links fails', async () => {
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-  const initialState = {
-    version: 1,
-    organization: 'https://dev.azure.com/example',
-    project: 'Catalog',
-    stateMap: createStateMap(),
-  };
-  const stateFile = createStateFile(repo, initialState);
-
-  class LinkFetchFailureTransport extends FakeTransport {
-    async listCompletedPullRequests(_context, options = {}) {
-      const rows = await super.listCompletedPullRequests(_context, options);
-      return rows.map((pr) => ({ ...pr, workItemRefs: [], workItemRefsError: true }));
-    }
-  }
-
-  const transport = new LinkFetchFailureTransport({
-    items: {
-      303: {
-        id: 303,
-        rev: 5,
-        fields: {
-          'System.WorkItemType': 'Bug',
-          'System.State': 'Active',
-          'System.Tags': '',
-          'System.Title': 'Link fetch failure item',
-        },
-      },
-    },
-    prs: [{
-      pullRequestId: 55,
-      sourceRefName: 'refs/heads/bug/ADO-303-link-fetch',
-      targetRefName: 'refs/heads/main',
-      creationDate: '2026-10-12T09:00:00.000Z',
-      closedDate: '2026-10-12T13:00:00.000Z',
-    }],
-  });
-
-  await reconcileBoard({
-    transport,
-    context: {},
-    stateMap: initialState.stateMap,
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-    stateFile,
-    projectState: initialState,
-  });
-
-  const saved = loadProjectState(stateFile);
-  assert.equal(saved.reconcile.processedPullRequests.length, 0);
-  assert.equal(saved.reconcile.retryablePullRequests[0].pullRequestId, '55');
-});
-
-test('reconcile exposes the PR id and sanitized cause when the work-item refs fetch fails over HTTP', async () => {
-  const { repo } = createRepo();
-  git(repo, 'remote', 'set-url', 'origin', 'https://dev.azure.com/example/Catalog/_git/engineering-catalog');
-  const initialState = {
-    version: 1,
-    organization: 'https://dev.azure.com/example',
-    project: 'Catalog',
-    stateMap: createStateMap(),
-  };
-  const stateFile = createStateFile(repo, initialState);
-  const { HttpAzureDevOpsTransport } = require('../skills/shared/ado-board/scripts/lib');
-
-  const transport = new HttpAzureDevOpsTransport({
-    context: { organization: 'https://dev.azure.com/example', project: 'Catalog' },
-    authHeader: 'Basic test',
-    fetchImpl: async (url) => {
-      const text = String(url);
-      if (text.includes('/_apis/git/repositories/engineering-catalog/pullrequests')) {
-        return {
-          ok: true,
-          status: 200,
-          text: async () => JSON.stringify({
-            value: [{
-              pullRequestId: 55,
-              sourceRefName: 'refs/heads/bug/ADO-303-http-failure',
-              targetRefName: 'refs/heads/main',
-              closedDate: '2026-10-12T13:00:00.000Z',
-              workItemRefs: [],
-            }],
-          }),
-        };
-      }
-      if (text.includes('/_apis/git/repositories/engineering-catalog/pullRequests/55/workitems')) {
-        return {
-          ok: false,
-          status: 503,
-          text: async () => JSON.stringify({ message: 'The service is temporarily unavailable.' }),
-        };
-      }
-      if (text.includes('/_apis/wit/wiql')) {
-        return {
-          ok: true,
-          status: 200,
-          text: async () => JSON.stringify({ workItems: [] }),
-        };
-      }
-      throw new Error(`unexpected url ${text}`);
-    },
-  });
-
-  const result = await reconcileBoard({
-    transport,
-    context: { organization: 'https://dev.azure.com/example', project: 'Catalog' },
-    stateMap: initialState.stateMap,
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-    stateFile,
-    projectState: initialState,
-  });
-
-  assert.equal(result.skipped[0].reason, 'work-item-links-error');
-  assert.equal(result.skipped[0].id, '55');
-  assert.match(result.skipped[0].message, /503|temporarily unavailable/i);
-  assert.equal(result.report.warnings.find((warning) => warning.code === 'pr-work-item-links-error').pullRequestId, '55');
-  const saved = loadProjectState(stateFile);
-  assert.equal(saved.reconcile.retryablePullRequests[0].pullRequestId, '55');
-});
-
-test('listTrackedItemsInBuckets splits large item lists into 200-id batches', async () => {
-  const batches = [];
-  const transport = new (require('../skills/shared/ado-board/scripts/lib').HttpAzureDevOpsTransport)({
-    context: { organization: 'https://dev.azure.com/example', project: 'Catalog' },
-    authHeader: 'Basic test',
-    fetchImpl: async (url, options) => {
-      if (String(url).includes('/_apis/wit/wiql')) {
-        return {
-          ok: true,
-          text: async () => JSON.stringify({
-            workItems: Array.from({ length: 201 }, (_, index) => ({ id: index + 1 })),
-          }),
-        };
-      }
-      if (String(url).includes('/_apis/wit/workitemsbatch')) {
-        const body = JSON.parse(options.body);
-        batches.push(body.ids);
-        return {
-          ok: true,
-          text: async () => JSON.stringify({
-            value: body.ids.map((id) => ({
-              id,
-              fields: {
-                'System.WorkItemType': 'Task',
-                'System.State': 'Active',
-                'System.Tags': '',
-                'System.Title': `Item ${id}`,
-              },
-            })),
-          }),
-        };
-      }
-      throw new Error(`unexpected url ${url}`);
-    },
-  });
-
-  const stateMap = {
-    Task: {
-      doing: 'Active',
-      verify: 'Resolved',
-      done: 'Closed',
-      categories: {
-        InProgress: ['Active'],
-        Resolved: ['Resolved'],
-        Completed: ['Closed'],
-      },
-    },
-  };
-
-  const result = await transport.listTrackedItemsInBuckets({}, stateMap, ['doing', 'verify']);
-  assert.equal(result.length, 201);
-  assert.deepEqual(batches.map((batch) => batch.length), [200, 1]);
-});
-
-test('reconcile does not rewrite the state file when no reconcile markers change', async () => {
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-  const initialState = {
-    version: 1,
-    organization: 'https://dev.azure.com/example',
-    project: 'Catalog',
-    stateMap: createStateMap(),
-    reconcile: {
-      lastCompletedPrClosedDate: '2026-10-12T13:00:00.000Z',
-      processedPullRequests: [{
-        key: 'engineering-catalog::55::refs/heads/main::2026-10-12T13:00:00.000Z',
-        pullRequestId: '55',
-        repository: 'engineering-catalog',
-        targetRefName: 'refs/heads/main',
-        sourceRefName: 'refs/heads/feature/ADO-303-retryable',
-        closedDate: '2026-10-12T13:00:00.000Z',
-        workItemIds: ['303'],
-      }],
-    },
-  };
-  const stateFile = createStateFile(repo, initialState);
-  const before = fs.readFileSync(stateFile, 'utf8');
-
-  await reconcileBoard({
-    transport: new FakeTransport(),
-    context: {},
-    stateMap: initialState.stateMap,
-    cwd: repo,
-    staleDays: 30,
-    throttleHours: 0,
-    stateFile,
-    projectState: initialState,
-  });
-
-  assert.equal(fs.readFileSync(stateFile, 'utf8'), before);
-});
-
-function prItem(id, extra = {}) {
-  return {
-    id,
-    rev: 2,
-    fields: {
-      'System.WorkItemType': 'Product Backlog Item',
-      'System.State': 'Committed',
-      'System.Tags': '',
-      'System.Title': `Item ${id}`,
-      'Microsoft.VSTS.Common.StateChangeDate': '2026-10-12T15:00:00.000Z',
-      'System.ChangedDate': '2026-10-12T15:00:00.000Z',
-      ...extra,
-    },
-  };
+  const env = { PATH: process.env.PATH, HOME: home, USERPROFILE: home, ENGCAT_HOME: home, AZURE_DEVOPS_EXT_PAT: 'x' };
+  const r = spawnSync(process.execPath, ['--require', stub, CLI, ...argv], { cwd, env, encoding: 'utf8', timeout: 20000 });
+  return { code: r.status, stdout: r.stdout, stderr: r.stderr, data: JSON.parse(r.stdout) };
 }
 
-function closedPr(pullRequestId, workItemId, closedDate = '2026-10-12T14:00:00.000Z') {
-  return {
-    pullRequestId,
-    sourceRefName: `refs/heads/feature/ADO-${workItemId}-x`,
-    targetRefName: 'refs/heads/main',
-    creationDate: '2026-10-12T13:00:00.000Z',
-    closedDate,
-    workItemRefs: [{ id: workItemId }],
-  };
-}
+test('runner contract: the exact argv of states.py and scenario.py, stdout is JSON', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'adoboard-'));
+  const cwd = path.join(home, 'repo');
+  fs.mkdirSync(cwd);
+  const git = (...a) => spawnSync('git', a, { cwd, encoding: 'utf8' });
+  git('init', '-q');
+  git('remote', 'add', 'origin', 'https://dev.azure.com/acme/Orion/_git/api');
 
-const reconcileArgs = (repo, transport, extra = {}) => ({
-  transport,
-  context: {},
-  stateMap: createStateMap(),
-  cwd: repo,
-  staleDays: 30,
-  throttleHours: 0,
-  ...extra,
-});
+  // scenario.py: states discover --json --non-interactive, one --choose per IDP_ADO_STATE_CHOICES entry.
+  const ask = runCli(['states', 'discover', '--json', '--non-interactive'], { routes: scrumRoutes(), home, cwd });
+  assert.equal(ask.code, 2);
+  assert.equal(ask.data.outcome, 'needs-choice');
+  const choices = ['Product Backlog Item:todo=New', 'Epic:todo=New'];
+  const discover = runCli(['states', 'discover', '--json', '--non-interactive', ...choices.flatMap((c) => ['--choose', c])], { routes: scrumRoutes(), home, cwd });
+  assert.equal(discover.code, 0, discover.stderr);
+  assert.equal(discover.data.stateMap['Product Backlog Item'].todo, 'New', 'every --choose counts, not only the last');
+  for (const t of ['Feature', 'Product Backlog Item', 'Task']) assert.ok(discover.data.stateMap[t].done, t);
 
-test('RX1 real-shaped updates: a human creation revision superseded by an own move is not a manual change after the PR closed', async () => {
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-  const transport = new FakeTransport({
-    items: { 5: prItem(5) },
-    updates: {
-      5: [
-        { revisedBy: { displayName: 'Product Owner' }, revisedDate: '2026-10-01T09:00:00.000Z', fields: { 'System.State': { newValue: 'New' } } },
-        {
-          revisedBy: { displayName: 'ado-board reconcile' },
-          revisedDate: '2026-10-12T15:00:00.000Z',
-          fields: {
-            'System.State': { newValue: 'Committed' },
-            'System.History': { newValue: 'ado-board: moved to doing after pushed work on feature/ADO-5-x (1234567).' },
-          },
-        },
-      ],
-    },
-    prs: [closedPr(10, 5)],
-  });
-  // the fake must emit the real shape: rev 1 is superseded at the own move, the last rev is 9999
-  const served = await transport.getWorkItemUpdates({}, 5);
-  assert.equal(served[0].revisedDate, '2026-10-12T15:00:00.000Z');
-  assert.equal(served[1].revisedDate, '9999-01-01T00:00:00Z');
+  // states.py CatalogStates.move: move <id> <bucket> --comment TEXT --allow-idp --json
+  const moveRoutes = [
+    { method: 'GET', match: /workitems\/7\?/, body: wi(7, 'Task', 'To Do', 'idp:owner') },
+    { method: 'PATCH', match: /workitems\/7\?/, body: {} },
+  ];
+  const move = runCli(['move', '7', 'doing', '--comment', 'phase build started', '--allow-idp', '--json'], { routes: moveRoutes, home, cwd });
+  assert.equal(move.code, 0, move.stderr);
+  assert.deepEqual([move.data.outcome, move.data.to], ['moved', 'In Progress']);
 
-  const result = await reconcileBoard(reconcileArgs(repo, transport));
-  assert.deepEqual(result.skipped, []);
-  assert.deepEqual(result.changed.map((entry) => ({ id: entry.id, to: entry.to })), [{ id: '5', to: 'done' }]);
-});
+  // states.py Reconciler: reconcile --json; an idp: card is never moved.
+  const recent = new Date().toISOString();
+  const reconcileRoutes = [
+    { method: 'GET', match: /git\/repositories\/api\?/, body: { id: 'r1', defaultBranch: 'refs/heads/main' } },
+    { method: 'GET', match: /repositories\/r1\/stats\/branches/, body: { value: [{ name: 'feature/ADO-7-x', aheadCount: 1, commit: { commitId: 'abc1234', committer: { date: recent } } }] } },
+    { method: 'GET', match: /repositories\/r1\/pullrequests\?/, body: { value: [] } },
+    { method: 'POST', match: /_apis\/wit\/wiql/, body: { workItems: [] } },
+    { method: 'GET', match: /_apis\/wit\/workitems\?/, body: { value: [wi(7, 'Task', 'To Do', 'idp:owner')] } },
+  ];
+  const reconcile = runCli(['reconcile', '--json'], { routes: reconcileRoutes, home, cwd });
+  assert.equal(reconcile.code, 0, reconcile.stderr);
+  assert.deepEqual(reconcile.data.moves, []);
+  assert.deepEqual(reconcile.data.skipped.map((s) => [s.id, s.reason]), [[7, 'idp-owned']]);
 
-test('RX1b a genuine human state change after the PR closed still blocks the replay under real-shaped updates', async () => {
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-  const transport = new FakeTransport({
-    items: { 5: prItem(5) },
-    updates: {
-      5: [
-        { revisedDate: '2026-10-01T09:00:00.000Z', fields: { 'System.State': { newValue: 'New' } } },
-        { revisedDate: '2026-10-12T15:00:00.000Z', revisedBy: { displayName: 'QA' }, fields: { 'System.State': { newValue: 'Committed' }, 'System.History': { newValue: 'reopened' } } },
-      ],
-    },
-    prs: [closedPr(10, 5)],
-  });
-  const result = await reconcileBoard(reconcileArgs(repo, transport));
-  assert.deepEqual(result.changed, []);
-  assert.equal(result.skipped[0].reason, 'pr-replayed-after-manual-change');
-});
-
-test('RX2 a failing /updates call on a PR item is a retryable move-error, not an exception', async () => {
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-  const initialState = { version: 1, organization: 'https://dev.azure.com/example', project: 'Catalog', stateMap: createStateMap() };
-  const stateFile = createStateFile(repo, initialState);
-  const transport = new FakeTransport({
-    items: { 5: prItem(5), 6: prItem(6, { 'Microsoft.VSTS.Common.StateChangeDate': '2026-10-01T00:00:00.000Z', 'System.ChangedDate': '2026-10-01T00:00:00.000Z' }) },
-    getUpdatesErrors: { 5: httpError(500, 'boom') },
-    prs: [closedPr(10, 5), closedPr(11, 6, '2026-10-12T14:30:00.000Z')],
-  });
-  const result = await reconcileBoard(reconcileArgs(repo, transport, { stateFile, projectState: initialState }));
-  assert.deepEqual(result.skipped.map((entry) => [entry.id, entry.reason]), [['5', 'move-error']]);
-  assert.deepEqual(result.changed.map((entry) => entry.id), ['6']);
-  assert.equal(transport.items.get('6').fields['System.State'], 'Done');
-  const saved = loadProjectState(stateFile);
-  assert.deepEqual(saved.reconcile.retryablePullRequests.map((entry) => entry.pullRequestId), ['10']);
-});
-
-test('RX2b a failing /updates call on a branch item is a move-error, not an exception', async () => {
-  const { repo } = createRepo();
-  createPushedBranch(repo, 'feature/ADO-5-catalog-sync', 'a.txt', 'a');
-  createPushedBranch(repo, 'feature/ADO-6-other', 'b.txt', 'b');
-  git(repo, 'fetch', 'origin');
-  const transport = new FakeTransport({
-    items: {
-      5: prItem(5, { 'System.State': 'New', 'Microsoft.VSTS.Common.StateChangeDate': '2099-01-01T00:00:00.000Z', 'System.ChangedDate': '2099-01-01T00:00:00.000Z' }),
-      6: prItem(6, { 'System.State': 'New', 'Microsoft.VSTS.Common.StateChangeDate': '2026-01-01T00:00:00.000Z', 'System.ChangedDate': '2026-01-01T00:00:00.000Z' }),
-    },
-    getUpdatesErrors: { 5: httpError(503, 'unavailable') },
-  });
-  const result = await reconcileBoard(reconcileArgs(repo, transport));
-  assert.deepEqual(result.skipped.map((entry) => [entry.id, entry.reason, entry.source]), [['5', 'move-error', 'branch-pushed']]);
-  assert.deepEqual(result.changed.map((entry) => entry.id), ['6']);
-});
-
-test('L-i a permanent required-field failure is a terminal per-item report and does not pin minTime', async () => {
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-  const initialState = { version: 1, organization: 'https://dev.azure.com/example', project: 'Catalog', stateMap: createStateMap() };
-  const stateFile = createStateFile(repo, initialState);
-  const transport = new FakeTransport({
-    items: { 5: prItem(5, { 'Microsoft.VSTS.Common.StateChangeDate': '2026-10-01T00:00:00.000Z', 'System.ChangedDate': '2026-10-01T00:00:00.000Z' }) },
-    failMoveById: { 5: new Error('TF401320: Rule Error for field Remaining Work. Error code: Required, InvalidEmpty.') },
-    prs: [closedPr(10, 5)],
-  });
-  const result = await reconcileBoard(reconcileArgs(repo, transport, { stateFile, projectState: initialState }));
-  assert.equal(result.skipped[0].reason, 'required-field');
-  const saved = loadProjectState(stateFile);
-  assert.equal(saved.reconcile.retryablePullRequests, undefined);
-  assert.deepEqual(saved.reconcile.processedPullRequests.map((entry) => entry.pullRequestId), ['10']);
-  assert.equal(saved.reconcile.lastCompletedPrClosedDate, '2026-10-12T14:00:00.000Z');
-});
-
-test('L-j the HTTP transport pages /updates and completed pull requests', async () => {
-  const { HttpAzureDevOpsTransport } = require('../skills/shared/ado-board/scripts/lib');
-  const urls = [];
-  const fetchImpl = async (url) => {
-    urls.push(url);
-    const parsed = new URL(url);
-    const top = Number(parsed.searchParams.get('$top'));
-    const skip = Number(parsed.searchParams.get('$skip') || 0);
-    const total = parsed.pathname.includes('/updates') ? 250 : 130;
-    const value = Array.from({ length: Math.max(0, Math.min(top, total - skip)) }, (_, i) => (
-      parsed.pathname.includes('/updates') ? { id: skip + i } : { pullRequestId: skip + i, workItemRefs: [] }
-    ));
-    return { ok: true, status: 200, text: async () => JSON.stringify({ value }) };
-  };
-  const transport = new HttpAzureDevOpsTransport({
-    context: { organization: 'https://dev.azure.com/example', project: 'Catalog' },
-    authHeader: 'Basic x',
-    fetchImpl,
-  });
-  const updates = await transport.getWorkItemUpdates({}, 5);
-  assert.equal(updates.length, 250);
-  assert.equal(new Set(updates.map((u) => u.id)).size, 250);
-  const prs = await transport.listCompletedPullRequests({}, { repository: 'repo' });
-  assert.equal(prs.length, 130);
-  assert.equal(new Set(prs.map((p) => p.pullRequestId)).size, 130);
-});
-
-test('L-k a revisedBy named ado-board without the marker is not an own transition', () => {
-  const { isOwnStateTransitionUpdate } = require('../skills/shared/ado-board/scripts/lib');
-  assert.equal(isOwnStateTransitionUpdate({
-    revisedBy: { displayName: 'ado-board reconcile' },
-    fields: { 'System.State': { newValue: 'Done' }, 'System.History': { newValue: 'plain human note' } },
-  }), false);
-});
-
-test('L-l parseAzureReposRemote accepts explicit ssh ports and project-less legacy visualstudio URLs', () => {
-  assert.deepEqual(parseAzureReposRemote('ssh://git@ssh.dev.azure.com:22/v3/HAL-TSS/TSS-Orion/Repo'), {
-    organization: 'https://dev.azure.com/HAL-TSS', organizationId: 'HAL-TSS', project: 'TSS-Orion', repository: 'Repo',
-  });
-  assert.deepEqual(parseAzureReposRemote('ssh://hal@vs-ssh.visualstudio.com:22/v3/hal/Catalog/Repo'), {
-    organization: 'https://hal.visualstudio.com', organizationId: 'hal', project: 'Catalog', repository: 'Repo',
-  });
-  assert.deepEqual(parseAzureReposRemote('https://hal.visualstudio.com/DefaultCollection/_git/Repo'), {
-    organization: 'https://hal.visualstudio.com', organizationId: 'hal', project: 'Repo', repository: 'Repo',
-  });
-});
-
-test('N10 the first reconcile has a bounded floor and a page budget; the CLI can widen both', async () => {
-  const { reconcileQueryMinTime, DEFAULT_FIRST_RUN_DAYS, DEFAULT_MAX_PR_PAGES } = require('../skills/shared/ado-board/scripts/lib');
-  const now = new Date('2026-10-12T12:00:00.000Z');
-  assert.equal(reconcileQueryMinTime(null, { now }), '2026-09-28T12:00:00.000Z');
-  assert.equal(reconcileQueryMinTime({}, { now, firstRunDays: 30 }), '2026-09-12T12:00:00.000Z');
-  assert.equal(reconcileQueryMinTime({ reconcile: { lastCompletedPrClosedDate: '2026-10-01T00:00:00.000Z' } }, { now }), '2026-10-01T00:00:00.000Z');
-
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-  const transport = new FakeTransport({ items: { 5: prItem(5) }, prs: [closedPr(10, 5)] });
-  await reconcileBoard(reconcileArgs(repo, transport));
-  assert.ok(transport.prQueries[0].minTime, 'first run must send a minTime');
-  const ageDays = (Date.now() - new Date(transport.prQueries[0].minTime).getTime()) / 86400000;
-  assert.ok(Math.abs(ageDays - DEFAULT_FIRST_RUN_DAYS) < 0.01);
-  assert.equal(transport.prQueries[0].maxPages, DEFAULT_MAX_PR_PAGES);
-});
-
-test('N10/L-n the HTTP transport honours maxPages and flags truncation', async () => {
-  const { HttpAzureDevOpsTransport } = require('../skills/shared/ado-board/scripts/lib');
-  let listCalls = 0;
-  const fetchImpl = async (url) => {
-    const parsed = new URL(url);
-    if (parsed.pathname.endsWith('/pullrequests')) listCalls += 1;
-    const skip = Number(parsed.searchParams.get('$skip') || 0);
-    const value = parsed.pathname.endsWith('/pullrequests')
-      ? Array.from({ length: 100 }, (_, i) => ({ pullRequestId: skip + i, workItemRefs: [] }))
-      : [];
-    return { ok: true, status: 200, text: async () => JSON.stringify({ value }) };
-  };
-  const transport = new HttpAzureDevOpsTransport({
-    context: { organization: 'https://dev.azure.com/example', project: 'Catalog' },
-    authHeader: 'Basic x',
-    fetchImpl,
-  });
-  const prs = await transport.listCompletedPullRequests({}, { repository: 'repo', maxPages: 2 });
-  assert.equal(listCalls, 2);
-  assert.equal(prs.length, 200);
-  assert.equal(prs.truncated, true);
-});
-
-test('L-n a truncated PR list is reported as a pr-list-truncated warning', async () => {
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-  const transport = new FakeTransport({ items: { 5: prItem(5) }, prs: [closedPr(10, 5)] });
-  const listed = transport.listCompletedPullRequests.bind(transport);
-  transport.listCompletedPullRequests = async (...args) => Object.assign(await listed(...args), { truncated: true });
-  const result = await reconcileBoard(reconcileArgs(repo, transport));
-  assert.deepEqual(result.report.warnings.map((w) => w.code), ['pr-list-truncated']);
-  const clean = await reconcileBoard(reconcileArgs(repo, new FakeTransport({ items: { 5: prItem(5) }, prs: [closedPr(10, 5)] })));
-  assert.deepEqual(clean.report.warnings.filter((w) => w.code === 'pr-list-truncated'), []);
-});
-
-test('L-m a PR returned on two pages is handled once and strands no retry entry', async () => {
-  const { repo } = createRepo();
-  git(repo, 'fetch', 'origin');
-  const initialState = { version: 1, organization: 'https://dev.azure.com/example', project: 'Catalog', stateMap: createStateMap() };
-  const stateFile = createStateFile(repo, initialState);
-  const transport = new FakeTransport({ items: { 5: prItem(5) }, prs: [closedPr(10, 5), closedPr(10, 5)] });
-  // first lookup fails transiently, later ones succeed
-  const getWorkItem = transport.getWorkItem.bind(transport);
-  let calls = 0;
-  transport.getWorkItem = async (...args) => {
-    calls += 1;
-    if (calls === 1) throw httpError(503, 'blip');
-    return getWorkItem(...args);
-  };
-  const result = await reconcileBoard(reconcileArgs(repo, transport, { stateFile, projectState: initialState }));
-  assert.equal(result.skipped.filter((s) => s.reason === 'move-error').length, 1);
-  const saved = loadProjectState(stateFile);
-  assert.deepEqual(saved.reconcile.retryablePullRequests.map((e) => e.pullRequestId), ['10']);
-  assert.equal(saved.reconcile.processedPullRequests.length, 0);
-});
-
-test('a saved first-run floor is reused as an ISO string and is not raised to a retryable PR date', () => {
-  const { reconcileQueryMinTime } = require('../skills/shared/ado-board/scripts/lib');
-  const later = new Date('2026-10-14T12:00:00Z');
-  const state = { reconcile: {
-    queryMinTime: '2026-09-29T12:00:00.000Z',
-    retryablePullRequests: [{ id: 300, repositoryId: 'r', closedDate: '2026-10-12T13:00:00.000Z' }],
-  } };
-  const min = reconcileQueryMinTime(state, { now: later });
-  assert.equal(typeof min, 'string');
-  assert.equal(min, '2026-09-29T12:00:00.000Z');
-  assert.equal(new URLSearchParams({ 'searchCriteria.minTime': min }).toString(),
-    'searchCriteria.minTime=2026-09-29T12%3A00%3A00.000Z');
-});
-
-test('an environment PAT authenticates on every platform, without az login', () => {
-  const { createTransport, envPat } = require('../skills/shared/ado-board/scripts/lib');
-  const context = { organization: 'https://dev.azure.com/o', project: 'p' };
-  const expected = `Basic ${Buffer.from(':secret-pat', 'utf8').toString('base64')}`;
-  for (const platform of ['linux', 'darwin', 'win32']) {
-    const transport = createTransport({ context, env: { AZURE_DEVOPS_EXT_PAT: 'secret-pat' }, platform, fetchImpl: async () => ({}) });
-    assert.equal(transport.authHeader, expected);
-  }
-  assert.equal(envPat({ ADO_PAT: ' alt ' }), 'alt');
-  assert.equal(envPat({}), null);
+  // board.js stays an alias of the same CLI.
+  const alias = spawnSync(process.execPath, [path.join(DIR, 'board.js'), 'nope'], { encoding: 'utf8' });
+  assert.equal(alias.status, 1);
+  assert.match(alias.stderr, /usage: ado-board\.js/);
 });

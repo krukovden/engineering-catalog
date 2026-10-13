@@ -10,8 +10,9 @@ const paint = (code, text) => `\x1b[${code}m${text}\x1b[0m`;
 const PR_CACHE_FILE = path.join(os.tmpdir(), 'claude-statusline-pr-cache.json');
 const PR_CACHE_TTL_MS = 30000;
 
-// When `origin` is an Azure DevOps remote, org/project/repo are parsed from it rather than
-// assumed — `az devops configure --defaults` may point at a different project.
+// This repo may be hosted on Azure DevOps rather than GitHub, so
+// org/project/repo are parsed from `origin` rather than assumed — `az devops configure
+// --defaults` on this machine points at a different project (TSS-MayflowerOne).
 function parseAdoRemote(url) {
   if (!url) return null;
   let m = url.match(/dev\.azure\.com\/([^/]+)\/([^/]+)\/_git\/([^/]+?)(?:\.git)?$/)

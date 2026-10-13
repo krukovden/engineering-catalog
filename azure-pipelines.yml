@@ -2,8 +2,11 @@
 #
 # Two builds, one file:
 #
-#   PR build (pr: main)   — computes the version this PR will release, from the highest `v*`
-#                           tag on main: same major.minor → patch + 1; a new major.minor in
+#   PR build (build-validation policy on main)
+#                         — Azure Repos ignores `pr: main`; the required build-validation
+#                           policy on `main` queues this pipeline for PRs instead. It computes
+#                           the version this PR will release, from the highest `v*` tag on
+#                           main: same major.minor → patch + 1; a new major.minor in
 #                           package.json → X.Y.0. Writes it into package.json, rebuilds every
 #                           manifest, tests, and — only when something changed — commits
 #                           `release: prepare vX.Y.Z` to the PR's SOURCE branch. The next PR
@@ -22,16 +25,14 @@ trigger:
     include:
       - main
 pr:
-  branches:
-    include:
-      - main
+  none # Azure Repos PR builds come from the required build-validation policy on main.
 
-pool:
-  vmImage: ubuntu-latest
 
 jobs:
   - job: prepare
     displayName: PR — prepare the release version
+    pool:
+      vmImage: ubuntu-latest
     condition: eq(variables['Build.Reason'], 'PullRequest')
     steps:
       - checkout: self
@@ -86,6 +87,8 @@ jobs:
 
   - job: tag
     displayName: main — tag the release
+    pool:
+      vmImage: ubuntu-latest
     condition: ne(variables['Build.Reason'], 'PullRequest')
     steps:
       - checkout: self

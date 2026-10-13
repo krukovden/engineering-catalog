@@ -366,3 +366,15 @@ a previous commit had changed the matcher *to* `Edit|Write` on the strength of t
 `.github/hooks/*.json` loads only inside a folder listed in `trustedFolders` — an untrusted
 checkout runs no repository hook at all, silently. A dev-side hook is therefore per-machine
 opt-in and can never be the enforcement for anything; `npm run check` is.
+
+### e-20261012-1e95 Hooks: context hooks only inform, a narrow PreToolUse deny is allowed and fails open
+- status: active
+- evidence: confirmed
+- pr: none
+- sha-at-write: 2a3c4557c80f8097b2a96c363dba010383c29228
+- merged-sha: none
+- supersedes: none
+- superseded-by: none
+- date: 2026-10-12
+
+DESIGN.md §15.3 used to say a hook may inform but never enforce. Its reason, Copilot dropping every `additionalContext` payload when two `SessionStart` hooks answer (`copilot-facts.md` §6.5), concerns context delivery only. A `PreToolUse` deny travels on a different channel. The rule was narrowed in two directions. Context hooks stay best-effort, and a plugin now has exactly one context-emitting `SessionStart` hook: `scanHooks` makes a second one a build error, so `ado-board`'s session line rides inside `catalog-freshness` instead. A `PreToolUse` hook may deny, but only an invariant decidable from the tool input and local git state, with no network and no session memory. Hook sources gained `matcher` (Claude tool names, rendered as Copilot runtime names) and `denies: true`. `lib/hooks.js` wraps a deny hook's generated command so it always exits 0, and the deny is the JSON decision on stdout. On Copilot any non-zero `preToolUse` exit denies, so a missing `node`, a failed `cd` or a crashing script would otherwise block every edit. The dev-side `block-generated` Copilot twin was changed to pass only exit 2 through for the same reason. Copilot deny hooks are refused by the loader until `COPILOT_DENY_CAPTURED` is set, because §4.1 is doc-sourced and every hook behaviour captured live so far differed from the docs in a silent way. The first shipped deny hook, `protected-branch` (refuses `git commit` on main/master in Azure Repos or receipt-carrying repositories), is therefore Claude-only. The cost is that a deny hook is bypassed whenever its runtime is broken; exit-code enforcement was the alternative, and on Copilot it turns any hook failure into a blocked session. Builds on e-20260916-b8c2 (one source per hook) and e-20260917-4d6b.

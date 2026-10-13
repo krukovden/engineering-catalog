@@ -30,6 +30,7 @@ $config = Get-AssistantConfig
 $context = Resolve-AssistantContext -Config $config -Name $ContextName
 # The helper was installed by the ado-credentials setup; this only resolves its path.
 $askpass = Write-GitAskpass
+Write-Host "Notice: project-workspace replaces sync-context.ps1 and will take over repository refresh/search next release."
 
 # git writes progress to stderr and returns non-zero for ordinary outcomes; let this
 # script keep going and record the outcome per repository instead of aborting the batch.

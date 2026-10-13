@@ -72,3 +72,12 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Andrej Karpathy (LLM Coding Observations)
+
+Source: <https://x.com/karpathy/status/2015883857489522876>
+
+| Here | Derived from | Nature of the change |
+|------|--------------|----------------------|
+| `skills/developers/implementation-discipline/` | Andrej Karpathy's observations on common LLM coding failures | Formulated into operational engineering rules (§3 Think Before Coding, §4 Single Source of Truth, §5 Surgical Changes, §6 Goal-Driven Execution) and adapted into catalog engineering discipline. |
+

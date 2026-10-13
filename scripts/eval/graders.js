@@ -34,6 +34,10 @@ function mapToolName(name) {
 function textForTarget(grader, trace) {
   // The case format's `target` key means "trace" for the whole transcript view; anything else
   // (including unset) means the final reply, matching the native runner's default.
+  if (grader.target && typeof grader.target === 'object' && grader.target.source === 'file') {
+    // `target: { source: file, path }` — the file the run left in its workdir; a missing file is ''.
+    try { return fs.readFileSync(path.join(trace.workdir, grader.target.path), 'utf8'); } catch { return ''; }
+  }
   return grader.target === 'trace' ? trace.raw : trace.reply;
 }
 
@@ -43,7 +47,7 @@ function gradeRegex(grader, trace) {
   const found = re.test(text);
   const match = grader.match || 'contains';
   const passed = match === 'not_contains' ? !found : found;
-  const where = grader.target === 'trace' ? 'trace' : 'reply';
+  const where = grader.target && typeof grader.target === 'object' ? `file ${grader.target.path}` : grader.target === 'trace' ? 'trace' : 'reply';
   return { passed, explanation: `pattern /${grader.pattern}/${grader.flags || ''} ${found ? 'matched' : 'did not match'} the ${where} (match: ${match})` };
 }
 

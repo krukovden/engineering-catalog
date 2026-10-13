@@ -64,6 +64,12 @@ How finely you divide skills. Finer division spends one of the two loads: more *
 
 _Avoid_: chunking, modularity
 
+### Negative Scoping
+
+Explicit guidance in a **model-invoked** skill's **description** or in a **router skill** defining when _not_ to use the skill, directing the agent to the appropriate alternative. Empirically lowers false-invocation rates across adjacent skills by establishing explicit boundaries between competing domains. Every negative scoping boundary in a model-invoked skill must be backed by at least one `trigger:negative` eval case.
+
+_Avoid_: anti-triggers, exclusions, negative constraints
+
 ## Information Hierarchy
 
 How a skill's content is arranged, and how far down the ladder each piece sits.
@@ -103,6 +109,12 @@ _Avoid_: doc, resource, knowledge base
 Moving **reference** down the ladder — out of SKILL.md and behind a **context pointer** — so the top stays legible. Not primarily a token optimisation; it is how the **information hierarchy** is protected. Licensed by **branching**: disclose what only some branches need, inline what every path needs, and if a pointer fires unreliably on must-have material, sharpen its wording, and pull it back inline only if that fails.
 
 _Avoid_: lazy loading, chunking
+
+### Conditionality
+
+The decision rule for **progressive disclosure**: split content into a sub-file only when it is read *conditionally* (a mode branch, an edge case, or a template used only in some runs). Content read on every invocation must stay inline in SKILL.md; splitting always-read content forces an extra model read-turn per run with zero disclosure benefit. Size is not the trigger for splitting.
+
+_Avoid_: size-based splitting, chunking by length
 
 ### Co-location
 
@@ -162,7 +174,15 @@ _Avoid_: premature closure, the rush, rushing, shortcutting
 
 _Failure mode._ Steering by prohibition — telling the agent what _not_ to do — which drags the forbidden behaviour into context and makes it _more_ available, not less. _Don't think of an elephant_, and the elephant is all there is; _never write verbose comments_, and verbosity is the pattern the agent has just read. The negation is a weak modifier the strongly-activated concept overruns, so the ban half-reads as an instruction to do the thing. Its **leading word** is the _elephant_: whatever a prohibition names into the frame. Cure: prompt the **positive** — describe the target behaviour ("write one-line comments") so the banned one is never spoken. A prohibition earns its place only as a hard guardrail on a behaviour you cannot phrase positively; even then, pair it with the positive target so attention lands on what to do.
 
+Contrast with **negative scoping**: while execution steering avoids prohibitions, invocation routing requires explicit negative boundaries ("When NOT to use") to prevent false triggers between skills.
+
 _Avoid_: ironic rebound, don't-prompting, the pink elephant
+
+### Subagent Encapsulation
+
+The architectural boundary separating an orchestrator from a dispatched subagent. The orchestrator provides strictly three items: the instruction path, structured inputs, and a return contract defining the report schema. The orchestrator never inlines step execution instructions into the spawn prompt and never inspects internal draft artifacts. Claims in a subagent's completion report are auxiliary; the orchestrator treats the git diff (`git status --short`, `git diff --stat`) as authoritative and verifies changes against it before accepting completion.
+
+_Avoid_: worker boundary, agent orchestration, delegation wrapper
 
 ## Pruning
 
@@ -199,3 +219,15 @@ _Failure mode._ An instruction that changes nothing because the model already do
 A leading word is a _technique_; No-Op is a _verdict_ on a line — and they cross. A leading word too weak to beat the default is a no-op (_be thorough_ when the agent is already thorough-ish), and the fix is a stronger word that passes the verdict (_relentless_), not a different technique. So the No-Op test — does it change behaviour versus the default? — is also how you grade whether a leading word is earning its repetitions. This is model-relative, not reader-relative: two people disagreeing over whether a line is a no-op disagree about the default, and settle it by running the skill, not by debate.
 
 _Avoid_: redundant instruction, restating the obvious, belaboring
+
+### Instruction Economy
+
+The discipline of treating the instruction budget as finite. Every added line dilutes every other rule. Enforced by: numeric caps over adjectives ('≤3 bullets'), ceilings rather than floors, capping the artifact instead of the reasoning, rationing emphasis (MUST/NEVER), eliminating double-check lines, and pairing each hard rule with its one-sentence why.
+
+_Avoid_: brevity, conciseness, token budget
+
+### Targeted Edits
+
+Mutating user-owned configuration (JSON/JSONC/YAML) through precise string replacement anchored to enclosing keys or AST round-trips, asserting that the new value appears exactly once. Prevents comment destruction, key reordering, and accidental clobbering caused by wholesale serialization.
+
+_Avoid_: in-place edits, partial edits, surgical modifications

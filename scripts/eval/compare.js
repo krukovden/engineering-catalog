@@ -89,6 +89,12 @@ function makeContainerExec({ isolation, runtime, root, target, effort, mounts })
   };
 }
 
+/** What both judges actually receive: only the model — neither `claude plugin eval` nor the
+ * headless judge call has an effort flag, so a configured `effort` is not recorded as applied. */
+function appliedJudge(judge) {
+  return judge && judge.model ? { target: judge.target, model: judge.model } : null;
+}
+
 /** One entry per cell that has cases to run, in a stable order. */
 function planCells({ cases, config, targets }) {
   const plan = [];
@@ -104,13 +110,13 @@ function planCells({ cases, config, targets }) {
 }
 
 /** Runs of one case in one arm on Claude, through the native command. */
-async function runClaudeArm({ entry, arm, pluginDir, c, byName, resultsDir, remainingUsd, exec }) {
+async function runClaudeArm({ entry, arm, pluginDir, c, byName, resultsDir, remainingUsd, exec, config }) {
   const outputDir = path.join(resultsDir, entry.id.replace(/[:/]/g, '_'), arm, c.name);
   const jsonPath = path.join(outputDir, 'result.json');
   fs.mkdirSync(outputDir, { recursive: true });
   const { records, outcome } = await claudeArm.runCase({
     pluginDir, caseName: c.name, runs: entry.runs, model: entry.cell.model,
-    judgeModel: null, allowTools: gatedTools(c.allowedTools),
+    judgeModel: config.judge && config.judge.model, allowTools: gatedTools(c.allowedTools),
     scaffold: !!(c.context && c.context.scaffold_script),
     maxCostUsd: remainingUsd, outputDir, jsonPath,
     cell: entry.cell, arm, cases: byName, exec,
@@ -133,9 +139,9 @@ async function runCopilotArm({ entry, arm, c, home, token, config, remainingUsd,
     if (spent >= remainingUsd) break;
     const r = await copilotArm.runCase({
       cell: entry.cell, arm, caseDef: c, home, token, index,
-      judge: config.judge, creditUsd: config.copilotCreditUsd, exec, judgeExec,
+      judge: appliedJudge(config.judge), creditUsd: config.copilotCreditUsd, exec, judgeExec,
     });
-    if (r.outcome === 'failed' || r.outcome === 'interrupted') outcome = r.outcome;
+    if (r.outcome === 'failed' || r.outcome === 'stall') outcome = r.outcome;
     spent += r.records.reduce((s, rec) => s + (rec.costUsd || 0), 0);
     records.push(...r.records);
   }
@@ -270,7 +276,7 @@ async function compare(opts) {
               : null;
             const r = entry.cell.target === 'copilot'
               ? await runCopilotArm({ entry, arm, c, home: copilotHomes[arm], token: ghTok, config, remainingUsd, judgeExec, exec: containerAdapter || copilotExec })
-              : await runClaudeArm({ entry, arm, pluginDir: arm === 'base' ? baseTree.path : root, c, byName, resultsDir, remainingUsd, exec: containerAdapter || exec });
+              : await runClaudeArm({ entry, arm, pluginDir: arm === 'base' ? baseTree.path : root, c, byName, resultsDir, remainingUsd, config, exec: containerAdapter || exec });
             if (r.outcome === 'failed') warn(`⚠ ${entry.id} ${arm} ${c.name}: the run failed and was dropped`);
             spentUsd += r.spent;
             records.push(...r.records);
@@ -317,7 +323,7 @@ async function compare(opts) {
 
   const print = fingerprint({
     baseSha, candidateSha, candidateDirty: isDirty({ root }),
-    suiteHash: hashSuite(selected.cases), cells: plan.map((e) => e.cell), judge: config.judge,
+    suiteHash: hashSuite(selected.cases), cells: plan.map((e) => e.cell), judge: appliedJudge(config.judge),
     claudeVersion: null, os: `${os.platform()} ${os.release()}`, isolation: isolationInfo,
     createdAt: now.toISOString(), partial, spentUsd: Number(spentUsd.toFixed(4)),
   });

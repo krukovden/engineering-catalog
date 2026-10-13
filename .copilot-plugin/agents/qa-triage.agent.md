@@ -1,7 +1,7 @@
 ---
 name: qa-triage
 description: "Triages a tester's observation before anything is filed — separates confirmed from reported from inferred, checks the board for duplicates, and decides whether it is a bug, a backlog item, or a question. Use when a tester describes unexpected behaviour and it is not yet clear what, if anything, should be filed."
-skills: [qa-ado-work-item, ado-credentials]
+skills: [qa-ado-work-item, ado-credentials, project-workspace]
 ---
 
 # Qa Triage
@@ -10,7 +10,9 @@ skills: [qa-ado-work-item, ado-credentials]
 
 1. **Build the evidence ledger**, using the categories and sourcing discipline of
    `qa-ado-work-item` Step 2. Search the repositories and the board before
-   asking anything.
+   asking anything. When the observation may span more than one repository, or
+   the repository is not already open here, search code across repositories with
+   `project-workspace` first.
 2. **Run the duplicate and parent search**, exactly as `qa-ado-work-item` Step 4
    does, and list every credible overlap with its id, type, state, and title.
 3. **Recommend a type and a parent.** A reproducible defect in current behaviour

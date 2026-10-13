@@ -2,7 +2,7 @@
      Machine-read fields: `reconciled-sha:` and `store:` lines. Keep it small; unit files win on conflict. -->
 # engineering-catalog — memory index
 
-reconciled-sha: 8a54e5d82ac5b85966a9e18843c63008b07dc9b6
+reconciled-sha: 1cd921c656bf
 store: committed
 
 ## What this project is
@@ -24,13 +24,13 @@ ships as self-contained Node scripts inside the memory skills. No runtime depend
 |---|---|
 | [[catalog-sources]] | the hand-written units, owner folders, bundles |
 | [[catalog-validation]] | frontmatter, loaders, invariant checks |
-| [[artifact-generation]] | build → catalog.json, plugin manifests and their listing metadata, READMEs |
-| [[distribution-cli]] | engcat install/update/status, receipts, PR/release-notes flow |
-| [[target-adapters]] | Claude and Copilot layouts, pure outputs, per-platform model hints |
-| [[project-memory]] | memory, memory-init, memory-writer |
-| [[azure-devops-access]] | ado-credentials preflight, qa-ado-work-item |
-| [[board-tracking]] | deterministic Azure Boards state discovery, forward-only moves, and reconcile with repo-derived ADO context, own-marker history guards, and retryable PR state |
-| [[eval-harness]] | eval cases and scaffolds, tiers, hook sources and contracts and what each host consumes, per-arm isolation, the two-worktree compare |
+| [[artifact-generation]] | build → catalog.json, plugin manifests and their listing metadata, per-platform workflow skill folders, READMEs |
+| [[distribution-cli]] | engcat install/update/status, receipts, legacy-assistant migration, PR/release-notes flow |
+| [[target-adapters]] | Claude and Copilot layouts, pure outputs, per-platform model hints, session-start instructions files |
+| [[project-memory]] | memory, memory-init, memory-writer; versioned managed blocks |
+| [[azure-devops-access]] | ado-credentials preflight (PAT on every OS, project setup, Azure CLI readiness only for az callers), qa-ado-work-item, ado-backlog-placement, ado-board (the one tracker exception; a merged PR stops at testing); one hash-bound, receipt-guarded publish contract |
+| [[eval-harness]] | eval cases and scaffolds, tiers, hook sources and contracts (context hooks inform, narrow fail-open deny hooks), per-arm isolation, the two-worktree compare |
+| [[project-workspace]] | repository map (repos.json) + catalog-owned reference store; read-only cross-repo search on origin/<default>; consent-gated clone and reset; needs/ask/options/then |
 
 ## Rejected at project level
 - A `productivity` owner folder — it is a theme, not an audience (e-20260915-7a1c)
@@ -40,4 +40,6 @@ ships as self-contained Node scripts inside the memory skills. No runtime depend
 - A second memory store, a tracker or a database as the store (e-20260915-b2d4)
 - Agent Plugins 1.0 as the manifest format — its fixed `skills/<name>/` discovery would dismantle the owner-folder axis (e-20260917-9b2e)
 - `claude plugin validate` in the pipeline — no CLI on the agent, and a guarded step passes silently (e-20260917-9b2e)
+- Per-commit git hooks for board tracking — squash merges, a network call and a credential in `post-commit` (e-20261012-29d1)
+- CRAP's multi-workspace or cross-repository federation for cross-repository search — one repository's areas, and blueprint markdown through Claude-only hooks (e-20261013-79fa)
 - (anything else before 2026-09-15 predates tracking)

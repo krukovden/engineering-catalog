@@ -92,6 +92,24 @@ test('the loader rejects what the native runner would reject', () => {
   assert.match(joined, /empty-prompt: the prompt body is empty/);
 });
 
+test('a regex grader that JavaScript cannot compile is a lint error', () => {
+  const root = tmpSuite({
+    'evals/alpha/inline-flags/prompt.md': CASE,
+    'evals/alpha/inline-flags/graders/g.md': "---\ntype: regex\npattern: '(?is)ready.*done'\n---\n",
+    'evals/alpha/bad-flags/prompt.md': CASE,
+    'evals/alpha/bad-flags/graders/g.md': "---\ntype: regex\npattern: 'ok'\nflags: q\n---\n",
+    'evals/alpha/bad-input/prompt.md': CASE,
+    'evals/alpha/bad-input/graders/g.md': "---\ntype: tool_used\ntool: Bash\ninput_match: '(?s)x'\n---\n",
+    'evals/alpha/fine/prompt.md': CASE,
+    'evals/alpha/fine/graders/g.md': "---\ntype: regex\npattern: 'ready[\\s\\S]*done'\nflags: i\n---\n",
+  });
+  const joined = loadSuite({ root }).errors.join('\n');
+  assert.match(joined, /inline-flags\/graders\/g\.md: pattern is not a JavaScript regular expression/);
+  assert.match(joined, /bad-flags\/graders\/g\.md: pattern is not a JavaScript regular expression/);
+  assert.match(joined, /bad-input\/graders\/g\.md: input_match is not a JavaScript regular expression/);
+  assert.doesNotMatch(joined, /alpha\/fine/);
+});
+
 test('two cases may not share a name', () => {
   const root = tmpSuite({
     'evals/alpha/one/prompt.md': '---\nname: shared-name\ntags: [behaviour]\n---\n\nhi\n',

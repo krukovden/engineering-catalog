@@ -8,13 +8,17 @@
 #
 #   2. APPROVAL IS BOUND TO CONTENT. Preview prints a draftHash over the exact patch it
 #      would send. -Commit requires that hash back. Edit the draft after the preview and
-#      the hash moves, so approval of an older wording cannot publish a newer one.
+#      the hash moves, so approval of an older wording cannot publish a newer one. The hash also
+#      covers the resolved organization and project, so pointing the draft's context (or the
+#      alias behind it) at another destination needs a new preview and a new approval.
 #
 #   3. PUBLISHING HAPPENS ONCE. A receipt file is written beside the draft before the
 #      request goes out and updated after it returns. A second -Commit never re-posts:
 #      it reports the item already created, or refuses because the previous attempt's
 #      outcome is unknown. A timed-out POST that actually succeeded cannot become two
-#      work items.
+#      work items. The receipt is created exclusively (CreateNew), so of two concurrent
+#      -Commit runs exactly one proceeds and the other is refused. A request Azure DevOps
+#      definitively rejected (HTTP 4xx) releases the receipt so the draft can be retried.
 #
 # Exit codes: 0 = preview produced, or item created and read back clean
 #             1 = validation or request error; nothing was created
@@ -132,7 +136,7 @@ $patchJson = ConvertTo-JsonArray -InputObject $patch -Depth 12
 
 # The hash covers exactly what would be sent, so reformatting the draft file does not
 # invalidate an approval but changing a single character of content does.
-$canonical = "$type|$parentId|$patchJson"
+$canonical = "$($organization.TrimEnd('/').ToLowerInvariant())|$($project.ToLowerInvariant())|$type|$parentId|$patchJson"
 $sha = [Security.Cryptography.SHA256]::Create()
 try {
   $draftHash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonical))) -replace '-', '').ToLowerInvariant().Substring(0, 16)
@@ -185,17 +189,41 @@ if ($ApprovedHash.Trim().ToLowerInvariant() -ne $draftHash) {
   Exit-WithMessage -Code 3 -Message "The draft changed after the approved preview (approved $ApprovedHash, current $draftHash). Preview again and ask for approval of the new content. Nothing was sent."
 }
 
-if (Test-Path -LiteralPath $receiptPath) {
-  $receipt = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
-  if ((Get-Prop $receipt "state") -eq "created") {
+# Exclusive creation is the lock: only one invocation can create the receipt, so the check
+# and the claim are one atomic step. Written before the request, so a lost response still
+# leaves a trail.
+function New-ReceiptLock {
+  param([string]$Path, [string]$Content)
+  try {
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+  }
+  catch [IO.IOException] { return $false }
+  try {
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($Content)
+    $stream.Write($bytes, 0, $bytes.Length)
+  }
+  finally { $stream.Dispose() }
+  return $true
+}
+
+$inFlight = [ordered]@{ state = "in-flight"; draftHash = $draftHash; organization = $organization; project = $project; title = $title; type = $type; startedAt = (Get-Date).ToString("o") } |
+  ConvertTo-Json -Depth 5
+
+if (-not (New-ReceiptLock -Path $receiptPath -Content $inFlight)) {
+  $receipt = $null
+  try { $receipt = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+  $state = if ($receipt) { Get-Prop $receipt "state" } else { $null }
+  if ($state -eq "created") {
     [ordered]@{ mode = "ALREADY-PUBLISHED"; id = $receipt.id; url = $receipt.url; publishedAt = $receipt.publishedAt } | ConvertTo-Json -Depth 5
     Write-Host "This draft was already published. No second item was created."
     exit 3
   }
-  $previous = if ((Get-Prop $receipt "state") -eq "failed") {
+  $previous = if ($state -eq "failed") {
     "failed at $(Get-Prop $receipt 'failedAt') with: $(Get-Prop $receipt 'error')"
-  } else {
+  } elseif ($state -eq "in-flight") {
     "started at $(Get-Prop $receipt 'startedAt') and never recorded an outcome"
+  } else {
+    "is being recorded by another run right now"
   }
   Exit-WithMessage -Code 3 -Message @"
 A previous publish of this draft $previous.
@@ -207,26 +235,27 @@ If it does not, delete that file and re-run.
 "@
 }
 
-# Written before the request, so a lost response still leaves a trail.
-[ordered]@{ state = "in-flight"; draftHash = $draftHash; title = $title; type = $type; startedAt = (Get-Date).ToString("o") } |
-  ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $receiptPath -Encoding UTF8
-
 try {
   $created = Invoke-AdoRest -Organization $organization -Project $project `
     -Path "_apis/wit/workitems/`$$([Uri]::EscapeDataString($type))" `
     -Method "Post" -Body $patchJson -ContentType "application/json-patch+json"
 }
 catch {
-  # The receipt stays — the request went out, and a lost response looks exactly like a
-  # rejected one from here. Record why, so the next run explains itself instead of just
-  # refusing.
-  [ordered]@{ state = "failed"; draftHash = $draftHash; title = $title; type = $type; failedAt = (Get-Date).ToString("o"); error = "$($_.Exception.Message)" } |
+  # An HTTP 4xx (or a rejected PAT) is an answer: the item was not created, so release the
+  # receipt and the draft can be retried. Anything else (timeout, 5xx, no response) looks
+  # exactly like a lost success, so the receipt stays and records why.
+  $errorText = "$($_.Exception.Message)"
+  if ($errorText -match '\(HTTP (400|401|403|404|422)\)' -or $errorText -match 'rejected the PAT' -or $errorText -match 'can sign in but is not allowed') {
+    Remove-Item -LiteralPath $receiptPath -Force -ErrorAction SilentlyContinue
+    Exit-WithMessage -Code 1 -Message "$errorText`n`nAzure DevOps rejected the request; nothing was created and the receipt was released. Fix the cause and re-run."
+  }
+  [ordered]@{ state = "failed"; draftHash = $draftHash; organization = $organization; project = $project; title = $title; type = $type; failedAt = (Get-Date).ToString("o"); error = "$($_.Exception.Message)" } |
     ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $receiptPath -Encoding UTF8
   Exit-WithMessage -Code 1 -Message "$($_.Exception.Message)`n`nRecorded in $receiptPath. Confirm the item was not created before re-running (see references/troubleshooting.md)."
 }
 
 $itemUrl = "$($organization.TrimEnd('/'))/$([Uri]::EscapeDataString($project))/_workitems/edit/$($created.id)"
-[ordered]@{ state = "created"; id = $created.id; url = $itemUrl; draftHash = $draftHash; title = $title; type = $type; publishedAt = (Get-Date).ToString("o") } |
+[ordered]@{ state = "created"; id = $created.id; url = $itemUrl; draftHash = $draftHash; organization = $organization; project = $project; title = $title; type = $type; publishedAt = (Get-Date).ToString("o") } |
   ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $receiptPath -Encoding UTF8
 
 # ---------------------------------------------------------------- read back

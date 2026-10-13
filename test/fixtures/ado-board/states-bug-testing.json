@@ -1,0 +1,13 @@
+{
+  "count": 8,
+  "value": [
+    { "name": "New", "color": "b2b2b2", "category": "Proposed" },
+    { "name": "Approved", "color": "b2b2b2", "category": "Proposed" },
+    { "name": "Committed", "color": "007acc", "category": "InProgress" },
+    { "name": "Ready for Testing", "color": "007acc", "category": "InProgress" },
+    { "name": "In Testing", "color": "007acc", "category": "InProgress" },
+    { "name": "Ready for Acceptance", "color": "ff9d00", "category": "Resolved" },
+    { "name": "Done", "color": "339933", "category": "Completed" },
+    { "name": "Removed", "color": "ffffff", "category": "Removed" }
+  ]
+}

@@ -165,6 +165,21 @@ isolation so this session's context is not spent on it. Either way the outcome i
 same: `reconciled-sha` advanced, `.pending` empty, an entry for every commit that
 passed the test and nothing for the rest.
 
+When you hand off to `memory-writer`, keep the caller-side contract explicit:
+
+1. **Instruction target:** the installed agent named `memory-writer`
+2. **Structured inputs:** the path to the `memory` skill directory, the `<memory>` path,
+   the project root when the store is `local`, and the current backlog from
+   `reconcile.js` if you already listed it
+3. **Return contract:** a short report with the four sections from the agent's `## Output`
+   contract — entries written, commits skipped, commits handed back, and the new
+   `reconciled-sha` plus remaining queue
+
+After it returns, verify the claim against the diff before you accept completion:
+run `git status --short`, `git diff --stat`, confirm the changed files are the
+reported memory files, and inspect any unclaimed change before you keep it. The
+returned report is auxiliary; the diff is authoritative.
+
 Run `lint.js` before finishing any session in which memory was written.
 
 ## Rules that keep memory honest

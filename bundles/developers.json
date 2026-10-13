@@ -6,12 +6,19 @@
     "writing-great-skills",
     "unslop",
     "diagnosing-bugs",
+    "catalog-doctor",
+    "catalog-feedback",
     "pr-review",
     "ado-credentials",
-    "ado-board",
+    "project-workspace",
     "ado-branch",
     "ado-pull-request",
+    "ado-pr-feedback",
+    "ado-board",
+    "ado-backlog-placement",
     "commit",
+    "git-sync",
+    "implementation-discipline",
     "catalog-freshness",
     "memory",
     "memory-init"
@@ -20,5 +27,7 @@
     "memory-writer",
     "code-reviewer"
   ],
-  "workflows": []
+  "workflows": [
+    "onboard-project"
+  ]
 }

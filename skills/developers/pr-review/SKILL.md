@@ -8,8 +8,9 @@ description: Review a branch or pull request before it is opened or merged — c
 An independent review of a branch before it becomes a pull request. The reviewer
 is the `code-reviewer` agent, run on a different model than the one that wrote
 the code, so the review is a second opinion and not the author grading itself.
-The rubric is `references/checklist.md`; this skill collects the input, launches
-the reviewer, and decides what to do with the report.
+The shared rubric is `references/checklist.md`, with repository-specific rule
+loading in `references/rules.md`; this skill collects the input, launches the
+reviewer, and decides what to do with the report.
 
 ## When it runs
 
@@ -26,17 +27,22 @@ the reviewer, and decides what to do with the report.
 Gather what the reviewer will need, from the repository root:
 
 ```sh
-git fetch origin main
 git log --oneline main..HEAD          # the commits and their claims
 git diff --stat main...HEAD           # what changed, how much
 sh scripts/file-sizes.sh              # changed files by size, ! past 300 lines, !! past 500
 ```
 
-For a PR rather than a branch, check out its source branch first, and collect
-its description too — the reviewer verifies every claim in it.
+For a PR rather than a branch, keep the shared tree read-only. Collect the PR
+description and refs without checking anything out:
 
-If the branch is not against `main`, pass the real base to every command above
-and to `scripts/file-sizes.sh <base> HEAD`.
+```sh
+gh pr view <id> --json title,body,baseRefName,headRefName
+git log --oneline origin/<base>..origin/<head>
+git diff --stat origin/<base>...origin/<head>
+sh scripts/file-sizes.sh origin/<base> origin/<head>
+```
+
+If the branch is not against `main`, pass the real base to every command above.
 
 ## Launch the reviewer
 
@@ -54,12 +60,12 @@ Name the base and the range explicitly whenever they are not `main...HEAD`.
 
 The report arrives in the format below. Act on it by severity:
 
-- **Critical and Important** — fix before the PR. Show the user each change you
-  make and the finding it answers. If you disagree with a finding, say why, with
+- **CRITICAL and HIGH** — fix before the PR. Show the user each change you make
+  and the finding it answers. If you disagree with a finding, say why, with
   evidence from the code; do not just skip it.
-- **Minor** — list them for the user; the user decides which to take.
-- **Unverified** — tell the user what the reviewer could not confirm, so they can
-  check it or accept the risk.
+- **MEDIUM and LOW** — list them for the user; the user decides which to take.
+- **Unverified** — tell the user what the reviewer could not confirm, so they
+  can check it or accept the risk.
 
 Never silently drop a finding. Every item in the report ends up either fixed,
 declined with a reason, or handed to the user.
@@ -71,6 +77,6 @@ Defined in `references/checklist.md`; in brief:
 ```markdown
 ### Verdict        Approve | Fix first
 ### Strengths      specific, before any finding
-### Findings       grouped Critical / Important / Minor, each `file:line — what — why — how to fix`
+### Findings       grouped CRITICAL / HIGH / MEDIUM / LOW, each `file:line — what — why — how to fix`
 ### Unverified     claims the reviewer could not confirm from the code
 ```

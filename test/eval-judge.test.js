@@ -49,6 +49,16 @@ test('runJudge: 2-of-3 PASS votes returns passed: true', async () => {
   assert.match(result.explanation, /2\/3/);
 });
 
+test('runJudge: a failed judge process throws instead of casting a FAIL vote', async () => {
+  const exec = async () => ({ text: '', error: 'Error: 401 authentication failed' });
+  await assert.rejects(runJudge({ grader: { type: 'llm', criteria: 'x' }, trace: TRACE, judge: JUDGE, exec }), (e) => e.judgeFailure === true && /authentication/.test(e.message));
+});
+
+test('runJudge: a failed judge process with empty stderr still throws', async () => {
+  const exec = async () => ({ text: '', failed: true, error: '' });
+  await assert.rejects(runJudge({ grader: { type: 'llm', criteria: 'x' }, trace: TRACE, judge: JUDGE, exec }), (e) => e.judgeFailure === true);
+});
+
 test('runJudge: 2-of-3 FAIL votes returns passed: false', async () => {
   let calls = 0;
   const exec = async () => {

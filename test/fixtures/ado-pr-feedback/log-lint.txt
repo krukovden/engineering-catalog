@@ -1,0 +1,4 @@
+start
+/src/a.js
+  3:1  error  no-unused-vars  eslint
+✖ 2 problems (2 errors, 0 warnings)

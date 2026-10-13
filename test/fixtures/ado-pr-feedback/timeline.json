@@ -1,0 +1,7 @@
+{"records":[
+{"id":"s1","parentId":null,"type":"Stage","name":"Build","result":"failed"},
+{"id":"j1","parentId":"s1","type":"Job","name":"Build job","result":"failed"},
+{"id":"t1","parentId":"j1","type":"Task","name":"Run unit tests","result":"failed","log":{"id":7},"issues":[{"type":"error","message":"Command failed with exit code 1"},{"type":"warning","message":"deprecated"}]},
+{"id":"t2","parentId":"j1","type":"Task","name":"Checkout","result":"succeeded","log":{"id":3}},
+{"id":"t3","parentId":"j1","type":"Task","name":"Compile","result":"failed","issues":[{"type":"error","message":"error TS2322: Type 'string' is not assignable to type 'number'."}]}
+]}

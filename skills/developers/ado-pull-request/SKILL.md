@@ -1,6 +1,6 @@
 ---
 name: ado-pull-request
-description: Finish a task with a pull request whose title and description feed the release notes — feat(<id>)/fix(<id>)/bug(<id>) lines written from the real diff, review offered, squash merge into main. Use when the user says "prepare the PR", "create a pull request", "the code is done", or is about to push a finished branch.
+description: Finish a task with a pull request whose title and description feed the release notes, or inspect/update Azure DevOps PR status — feat(<id>)/fix(<id>)/bug(<id>) lines written from the real diff, review offered, squash merge into main. Use when the user says "prepare the PR", "create a pull request", "the code is done", is about to push a finished branch, wants a PR dashboard/status view, or asks to update a drifted PR title/body. Not for reviewing someone else's PR, explaining what squash merge means, or working on non-Azure-DevOps PRs.
 requires:
   - ado-credentials
   - pr-review
@@ -14,14 +14,32 @@ body = PR description — is what the release-notes pipeline reads. Every line s
 `feat(<id>): …`, `fix(<id>): …` or `bug(<id>): …` becomes a release-note line. Nothing
 else does. The format is in `references/release-notes.md`.
 
+When `project-workspace` is installed, run its `register` command for the current repository; do nothing else with it here.
+
 ## Prepare the PR
 
 The user says the work is done ("prepare the PR", "create a pull request", or is about
 to push).
 
-**Preflight.** Run the `ado-credentials` skill first and read its outcome. On `absent` or
+## Other modes
+
+- **One-time repository setup.** When the user asks how `main` should be gated for this
+  flow, use `references/branch-policy-template.md`. It is documentation only: the user
+  runs the commands; this skill never creates policies or pipeline YAML on its own.
+- **Dashboard / status.** When the user wants "my PRs", "what can merge", "what needs my
+  vote", or "why can't PR 123 merge", use `references/pr-dashboard.md`.
+- **Update an existing PR.** When the scope drifted and the title/body must catch up, use
+  `references/pr-update.md`. Rewriting an existing PR still needs explicit user approval
+  before `az repos pr update`.
+
+**Preflight.** Run the `ado-credentials` skill first (`-RequireAz` on Windows,
+`--require-az` on macOS/Linux, because this skill runs `az`) and read its outcome. On `absent` or
 `expired` it has already told the user what to do — still work through steps 1–7 so the
-draft is ready, but stop before step 8; do not try the Azure DevOps call anyway.
+draft is ready, but stop before step 8; do not try the Azure DevOps call anyway. That
+preflight also owns the Azure CLI readiness for this skill: if it reported missing `az`,
+no `az` login, a missing `azure-devops` extension, or missing default
+organization/project, stop and point the user back to its recovery steps instead of
+re-checking them here.
 
 1. **Check the branch is ready.**
 
@@ -89,21 +107,42 @@ draft is ready, but stop before step 8; do not try the Azure DevOps call anyway.
    labels, the line order, the blank line. After the rewrite, check every release-note
    line again: still imperative, still ≤ 72 characters, still no trailing period.
 
-7. **Show it and offer a review.** Print the title and the description. Then ask:
-   *"Run the `pr-review` skill first? (recommended)"* — on yes, run it and come back to
-   this step with the result applied; on no, carry on — declining is a normal answer.
-   Then wait for the user's explicit **yes** to create the PR. Silence, "looks fine"
-   about the text, or a question is not a yes. This step is never skipped: when the
-   Azure DevOps preflight already said `absent`/`expired`, or the run cannot ask
-   questions, still print the draft and state the two choices (review now / create later)
-   so the user knows what remains.
+7. **Show it, offer a review, and get explicit approvals.** Print the title and the
+   description. Then ask: *"Run the `pr-review` skill first? (recommended)"* — on yes,
+   run it and come back to this step with the result applied; on no, carry on —
+   declining is a normal answer. As soon as the review is finished (or declined), and
+   before asking anything else, save the commit that was reviewed:
+
+   ```sh
+   git rev-parse HEAD
+   ```
+
+   Keep that SHA as `REVIEWED_SHA`; step 8 pushes only that commit. A commit added after
+   this point — while the user is still answering — has not been reviewed: if the user
+   wants it in, go back to the start of this step. Then wait for two explicit answers: create the PR now,
+   and if yes, set it to auto-complete with squash + linked work items transitioned on
+   merge. Silence, "looks fine" about the text, or a question is not a yes. A yes to
+   the draft is not a yes to create; a yes to create is not a yes to auto-complete.
+   This step is never skipped: when the Azure DevOps preflight already said
+   `absent`/`expired`, or the run cannot ask questions, still print the draft and state
+   the two choices (review now / create later) so the user knows what remains.
 
 8. **Create it.** One `--description` argument per line, an empty string for the blank
    line:
 
    ```sh
+   branch="$(git branch --show-current)"
+   reviewed="<REVIEWED_SHA>"
+   [ "$(git rev-parse HEAD)" = "$reviewed" ] || { echo "HEAD moved since the review; review again"; exit 1; }
+   if git rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null; then
+     git push origin "$branch" || exit 1
+   else
+     git push -u origin "$branch" || exit 1
+   fi
+   [ "$(git ls-remote origin "refs/heads/$branch" | cut -f1)" = "$reviewed" ] || { echo "remote branch does not match the reviewed commit"; exit 1; }
+
    az repos pr create \
-     --source-branch "<branch>" --target-branch main \
+     --source-branch "$branch" --target-branch main \
      --title "<first line>" \
      --description "<line 1>" "<line 2>" "" "Why: …" "How tested: …" "Work item: #<id>" \
      --work-items <id> \
@@ -111,13 +150,37 @@ draft is ready, but stop before step 8; do not try the Azure DevOps call anyway.
      -o json
    ```
 
-   Push the branch first if it has no upstream (`git push -u origin <branch>`). From the
-   JSON, print `pullRequestId` and the URL
+   Always push the current branch after approval, even when it already has an upstream,
+   and never force-push. `<REVIEWED_SHA>` is the SHA saved in step 7; if HEAD is no
+   longer that commit, stop before pushing and go back to step 7. After the push,
+   verify the remote tip equals the reviewed HEAD on the server itself (`git ls-remote`,
+   not the local `origin/<branch>` ref) before creating the PR; if that check fails, stop
+   and say the remote branch does not match the reviewed commit. From the JSON, print `pullRequestId` and the URL
    (`<organization>/<project>/_git/<repository.name>/pullrequest/<pullRequestId>`).
+   When the user explicitly agreed to auto-complete, follow the create with:
+
+   ```sh
+   az repos pr update \
+     --id <pullRequestId> \
+     --auto-complete true \
+     --squash true \
+     --transition-work-items true \
+     -o json
+   ```
+
+   `--auto-complete`, `--squash` and `--transition-work-items` were checked against
+   `az repos pr update --help`. If the user declined auto-complete, skip this command.
 
 9. **Close the loop with memory.** If a memory entry (the `memory` skill) was written on
    this branch, set its `pr:` field to the new PR id — the merge-time reconcile finds the
    entry by that number.
+
+## When NOT to use
+
+- The user wants a code review of someone else's PR before merge — `pr-review`.
+- The user asks what squash merge means or wants general Azure DevOps help with no PR
+  action.
+- The pull request lives on GitHub or another host; this skill speaks only Azure DevOps.
 
 ## Never
 

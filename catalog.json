@@ -1,40 +1,82 @@
 {
   "name": "engineering-catalog",
   "description": "AI engineering catalog — skills, agents, workflows and bundles for GitHub Copilot and Claude Code",
-  "version": "1.0.7",
+  "version": "1.1.0",
   "source": "https://github.com/krukovden/engineering-catalog",
   "skills": [
     {
-      "name": "ado-board",
-      "description": "Keep Azure Boards in sync with repo facts — discover each work item type's states, move one item forward with an evidence comment, and reconcile pushed branches and completed PRs back onto the board. Use when board tracking must be deterministic or when the platform needs board movement without reimplementing it.",
+      "name": "ado-backlog-placement",
+      "description": "Find where a new task belongs on the Azure Boards backlog — check for an existing item, rank the open Features it could sit under, offer to create a Feature when none fits, then draft the PBI and create it only after an explicit yes. Optional; it asks first. Use when the user says \"I need to do X\" or \"start working on X\" with no work item id, \"put this on the board\", \"where does this belong\", or \"create a PBI for …\" without naming a parent.",
       "folder": "shared",
       "invocation": "model",
       "platforms": {},
       "requires": [
         "ado-credentials"
       ],
+      "sessionStart": false,
+      "path": "skills/shared/ado-backlog-placement",
+      "version": "0d94dd353607"
+    },
+    {
+      "name": "ado-board",
+      "description": "Keep the Azure Boards card in step with the code — move a work item forward (todo → doing → testing → verify → done) on evidence, and reconcile the board with pushed branches and completed pull requests. Use when the user says \"move 123 to doing\", \"mark the bug resolved\", \"sync the board\", \"reconcile the board\", \"which of my items have not moved\", or a session line says items have not moved. Also run `states discover` once per project before the first move.",
+      "folder": "shared",
+      "invocation": "model",
+      "platforms": {},
+      "requires": [
+        "ado-credentials"
+      ],
+      "sessionStart": false,
       "path": "skills/shared/ado-board",
-      "version": "e2b188b87334"
+      "version": "a68d8a0e0a55"
     },
     {
       "name": "ado-credentials",
-      "description": "Preflight for Azure DevOps access — answers whether a credential is present, whether it still works against the organization, and exactly what to do if not. Run it first, then continue with the skill that needs Azure DevOps (for example qa-ado-work-item to file a bug); that skill starts only after this one answers ok. On Windows it checks the DPAPI-protected PAT written by its setup script; on macOS/Linux it checks the az CLI login and the azure-devops extension.",
+      "description": "Preflight for Azure DevOps access — answers whether a credential is present, whether it still works against the organization, and exactly what to do if not. Run it first, then continue with the skill that needs Azure DevOps (for example qa-ado-work-item to file a bug); that skill starts only after this one answers ok. Also use when the user asks which Azure DevOps projects are connected, wants to add or remove a project (they give a board link and code links), says they now work in or want to switch to another project or team, or needs to enter or replace their PAT — on Windows all of it runs through this conversation, the user never runs a script. On macOS/Linux it proves the PAT in AZURE_DEVOPS_EXT_PAT when one is set, else the az CLI login and the azure-devops extension.",
       "folder": "shared",
       "invocation": "model",
       "platforms": {},
       "requires": [],
+      "sessionStart": false,
       "path": "skills/shared/ado-credentials",
-      "version": "799b47279bb6"
+      "version": "9a48f020c6c8"
+    },
+    {
+      "name": "catalog-doctor",
+      "description": "Runs only when asked — diagnose this engineering catalog install and repository wiring, report silent failure modes, and tell you the next fix.",
+      "folder": "shared",
+      "invocation": "user",
+      "platforms": {},
+      "requires": [
+        "ado-credentials"
+      ],
+      "sessionStart": false,
+      "path": "skills/shared/catalog-doctor",
+      "version": "28474a01ce47"
+    },
+    {
+      "name": "catalog-feedback",
+      "description": "Runs only when asked — draft and, after explicit approval, file Azure DevOps feedback about this catalog with the unit, receipt version and platform attached automatically.",
+      "folder": "shared",
+      "invocation": "user",
+      "platforms": {},
+      "requires": [
+        "ado-credentials"
+      ],
+      "sessionStart": false,
+      "path": "skills/shared/catalog-feedback",
+      "version": "4815dbe6c82b"
     },
     {
       "name": "catalog-freshness",
-      "description": "Once per session, before other work, check whether the installed engineering catalog is outdated — run the freshness script (it is cheap, needs only git, and stays silent when nothing is due) and relay its one-line hint to the user if it prints one. Applies to every project where the catalog is installed, on Claude Code and on GitHub Copilot alike.",
+      "description": "Once per session, before other work, check whether the installed engineering catalog is outdated — run the freshness script (it is cheap, needs only git, and stays silent when nothing is due) and relay its one-line hint to the user if it prints one. Applies to every project where the catalog is installed, on Claude Code and on GitHub Copilot alike. Also use when the user asks which version of the engineering catalog is installed; then run the script with --version (-Version) and answer with the line it prints.",
       "folder": "shared",
       "invocation": "model",
       "platforms": {},
       "requires": [],
+      "sessionStart": true,
       "path": "skills/shared/catalog-freshness",
-      "version": "ed3906e3228a"
+      "version": "03c7ee6a24ed"
     },
     {
       "name": "grilling",
@@ -43,6 +85,7 @@
       "invocation": "model",
       "platforms": {},
       "requires": [],
+      "sessionStart": false,
       "path": "skills/shared/grilling",
       "version": "1fa694c4a1e5"
     },
@@ -53,8 +96,9 @@
       "invocation": "model",
       "platforms": {},
       "requires": [],
+      "sessionStart": false,
       "path": "skills/shared/memory",
-      "version": "8c4d814ed925"
+      "version": "81fce198e66c"
     },
     {
       "name": "memory-init",
@@ -65,8 +109,22 @@
       "requires": [
         "memory"
       ],
+      "sessionStart": false,
       "path": "skills/shared/memory-init",
-      "version": "662b016dd83a"
+      "version": "8256229926ec"
+    },
+    {
+      "name": "project-workspace",
+      "description": "Search several of the team's repositories at once, read-only, and know where every repository lives on this computer. Use when the user says \"find where this breaks\", \"search all our repositories\", \"which project has this code\", \"did this change recently\", \"check Warehouse, Reports and Sidecar\", names more than one repository to look in, or another skill needs to look at code it does not have open. Not for one repository the user is already working in — search that one directly.",
+      "folder": "shared",
+      "invocation": "model",
+      "platforms": {},
+      "requires": [
+        "ado-credentials"
+      ],
+      "sessionStart": false,
+      "path": "skills/shared/project-workspace",
+      "version": "642720480b47"
     },
     {
       "name": "unslop",
@@ -75,6 +133,7 @@
       "invocation": "model",
       "platforms": {},
       "requires": [],
+      "sessionStart": false,
       "path": "skills/shared/unslop",
       "version": "48cdddc52bbb"
     },
@@ -85,8 +144,9 @@
       "invocation": "user",
       "platforms": {},
       "requires": [],
+      "sessionStart": false,
       "path": "skills/shared/writing-great-skills",
-      "version": "fbd6e14629b6"
+      "version": "b6f77e8623aa"
     },
     {
       "name": "ado-branch",
@@ -97,12 +157,26 @@
       "requires": [
         "ado-credentials"
       ],
+      "sessionStart": false,
       "path": "skills/developers/ado-branch",
-      "version": "d758b0be9ded"
+      "version": "b54e21e78ebe"
+    },
+    {
+      "name": "ado-pr-feedback",
+      "description": "Address review comments on an Azure DevOps pull request — classify every comment against the current code first, fix what is valid, commit before replying, then set each thread's status (fixed / wontFix / closed) once the user approves. Use when the user says \"address the PR comments\", \"go through the review feedback\", \"resolve the threads on PR 123\", \"CI is red on my PR\", or pastes a reviewer's comment to act on.",
+      "folder": "developers",
+      "invocation": "model",
+      "platforms": {},
+      "requires": [
+        "ado-credentials"
+      ],
+      "sessionStart": false,
+      "path": "skills/developers/ado-pr-feedback",
+      "version": "d8de7acd4eee"
     },
     {
       "name": "ado-pull-request",
-      "description": "Finish a task with a pull request whose title and description feed the release notes — feat(<id>)/fix(<id>)/bug(<id>) lines written from the real diff, review offered, squash merge into main. Use when the user says \"prepare the PR\", \"create a pull request\", \"the code is done\", or is about to push a finished branch.",
+      "description": "Finish a task with a pull request whose title and description feed the release notes, or inspect/update Azure DevOps PR status — feat(<id>)/fix(<id>)/bug(<id>) lines written from the real diff, review offered, squash merge into main. Use when the user says \"prepare the PR\", \"create a pull request\", \"the code is done\", is about to push a finished branch, wants a PR dashboard/status view, or asks to update a drifted PR title/body. Not for reviewing someone else's PR, explaining what squash merge means, or working on non-Azure-DevOps PRs.",
       "folder": "developers",
       "invocation": "model",
       "platforms": {},
@@ -111,8 +185,9 @@
         "pr-review",
         "unslop"
       ],
+      "sessionStart": false,
       "path": "skills/developers/ado-pull-request",
-      "version": "c9a9bb2485f1"
+      "version": "66e5637225ee"
     },
     {
       "name": "commit",
@@ -123,6 +198,7 @@
       "requires": [
         "unslop"
       ],
+      "sessionStart": false,
       "path": "skills/developers/commit",
       "version": "3dd8fb15383c"
     },
@@ -133,8 +209,33 @@
       "invocation": "model",
       "platforms": {},
       "requires": [],
+      "sessionStart": false,
       "path": "skills/developers/diagnosing-bugs",
-      "version": "a07f099e1997"
+      "version": "8a13b2a8fe35"
+    },
+    {
+      "name": "git-sync",
+      "description": "Sync the current branch with base or upstream changes, merge latest main, check if behind, resolve merge conflicts, or tidy squash-merged branches. Use when the user asks to sync with remote, pull or merge upstream/main, check branch freshness or behind count, resolve git conflicts, or clean up merged branches.",
+      "folder": "developers",
+      "invocation": "model",
+      "platforms": {},
+      "requires": [
+        "ado-credentials"
+      ],
+      "sessionStart": false,
+      "path": "skills/developers/git-sync",
+      "version": "4cf6bf26fa94"
+    },
+    {
+      "name": "implementation-discipline",
+      "description": "Developer reference for implementation work — verify sub-agent diffs, re-run affected tests after base merges, think before coding, and keep a single source of truth. Use when the user asks for implementation discipline or coding principles, or when checking a sub-agent diff or what to do after merging main into a branch.",
+      "folder": "developers",
+      "invocation": "model",
+      "platforms": {},
+      "requires": [],
+      "sessionStart": false,
+      "path": "skills/developers/implementation-discipline",
+      "version": "fca282b396e4"
     },
     {
       "name": "pr-review",
@@ -143,8 +244,9 @@
       "invocation": "model",
       "platforms": {},
       "requires": [],
+      "sessionStart": false,
       "path": "skills/developers/pr-review",
-      "version": "16d55ad3ab01"
+      "version": "107ce837494d"
     },
     {
       "name": "qa-ado-work-item",
@@ -153,10 +255,12 @@
       "invocation": "model",
       "platforms": {},
       "requires": [
-        "ado-credentials"
+        "ado-credentials",
+        "project-workspace"
       ],
+      "sessionStart": false,
       "path": "skills/qa/qa-ado-work-item",
-      "version": "689928601339"
+      "version": "1fdef32c0c9e"
     },
     {
       "name": "safety-ssh",
@@ -165,6 +269,7 @@
       "invocation": "model",
       "platforms": {},
       "requires": [],
+      "sessionStart": false,
       "path": "skills/ops/safety-ssh",
       "version": "7a1693d41270"
     }
@@ -193,7 +298,7 @@
         "copilot": "gemini-3.8-flash"
       },
       "path": "agents/developers/code-reviewer.md",
-      "version": "d27e608fd689"
+      "version": "cfd8034d52d3"
     },
     {
       "name": "qa-triage",
@@ -201,14 +306,39 @@
       "folder": "qa",
       "skills": [
         "qa-ado-work-item",
-        "ado-credentials"
+        "ado-credentials",
+        "project-workspace"
       ],
       "model": null,
       "path": "agents/qa/qa-triage.md",
-      "version": "57082551f18d"
+      "version": "cb3e1f1dc296"
     }
   ],
   "workflows": [
+    {
+      "name": "onboard-project",
+      "description": "Guided project onboarding — preflight Azure DevOps credentials, initialise project memory, discover board states, inspect branch policies, and verify with catalog-doctor.",
+      "folder": "shared",
+      "steps": [
+        {
+          "skill": "ado-credentials"
+        },
+        {
+          "skill": "memory-init"
+        },
+        {
+          "skill": "project-workspace"
+        },
+        {
+          "skill": "ado-board"
+        },
+        {
+          "skill": "catalog-doctor"
+        }
+      ],
+      "path": "workflows/shared/onboard-project.md",
+      "version": "a99f24e58978"
+    },
     {
       "name": "observation-to-work-item",
       "description": "From a tester's observation to an approved Azure DevOps work item — preflight the credential, triage the observation, draft, get explicit approval, publish once and read it back.",
@@ -225,7 +355,7 @@
         }
       ],
       "path": "workflows/qa/observation-to-work-item.md",
-      "version": "2e994abd1d20"
+      "version": "75d4bcce84e5"
     }
   ],
   "bundles": [
@@ -238,12 +368,19 @@
         "writing-great-skills",
         "unslop",
         "diagnosing-bugs",
+        "catalog-doctor",
+        "catalog-feedback",
         "pr-review",
         "ado-credentials",
-        "ado-board",
+        "project-workspace",
         "ado-branch",
         "ado-pull-request",
+        "ado-pr-feedback",
+        "ado-board",
+        "ado-backlog-placement",
         "commit",
+        "git-sync",
+        "implementation-discipline",
         "catalog-freshness",
         "memory",
         "memory-init"
@@ -252,7 +389,9 @@
         "memory-writer",
         "code-reviewer"
       ],
-      "workflows": []
+      "workflows": [
+        "onboard-project"
+      ]
     },
     {
       "name": "ops",
@@ -260,6 +399,11 @@
       "description": "Machines and infrastructure, safely.",
       "skills": [
         "safety-ssh",
+        "ado-credentials",
+        "project-workspace",
+        "ado-board",
+        "catalog-doctor",
+        "catalog-feedback",
         "catalog-freshness",
         "memory",
         "memory-init"
@@ -267,7 +411,9 @@
       "agents": [
         "memory-writer"
       ],
-      "workflows": []
+      "workflows": [
+        "onboard-project"
+      ]
     },
     {
       "name": "product",
@@ -278,7 +424,11 @@
         "writing-great-skills",
         "unslop",
         "ado-credentials",
+        "project-workspace",
         "ado-board",
+        "ado-backlog-placement",
+        "catalog-doctor",
+        "catalog-feedback",
         "catalog-freshness",
         "memory",
         "memory-init"
@@ -286,7 +436,9 @@
       "agents": [
         "memory-writer"
       ],
-      "workflows": []
+      "workflows": [
+        "onboard-project"
+      ]
     },
     {
       "name": "qa",
@@ -296,6 +448,10 @@
         "grilling",
         "unslop",
         "ado-credentials",
+        "project-workspace",
+        "ado-board",
+        "catalog-doctor",
+        "catalog-feedback",
         "qa-ado-work-item",
         "catalog-freshness",
         "memory",
@@ -306,7 +462,8 @@
         "memory-writer"
       ],
       "workflows": [
-        "observation-to-work-item"
+        "observation-to-work-item",
+        "onboard-project"
       ]
     }
   ]

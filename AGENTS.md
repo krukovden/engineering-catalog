@@ -29,8 +29,8 @@ Four hand-written sources — `skills/<owner>/<name>/SKILL.md`, `agents/<owner>/
 | Generated | Read by |
 |---|---|
 | `catalog.json` | the `engcat` CLI |
-| `.claude-plugin/marketplace.json`, `.claude-plugin/plugin.json`, `hooks/hooks.json` | Claude Code (marketplace path, update detection, plugin hooks) |
-| `plugin.json` (repo root), `.copilot-plugin/agents/*.agent.md`, `.copilot-plugin/hooks.json` | GitHub Copilot CLI (plugin manifest: `skills` = owner folders, `agents` = that one directory, `hooks` = Copilot-format hooks) |
+| `.claude-plugin/marketplace.json`, `.claude-plugin/plugin.json`, `hooks/hooks.json`, `.claude-workflows/<name>/SKILL.md` | Claude Code (marketplace path, update detection, plugin hooks, workflows as user-invoked skills) |
+| `plugin.json` (repo root), `.copilot-plugin/agents/*.agent.md`, `.copilot-plugin/workflows/<name>/SKILL.md`, `.copilot-plugin/hooks.json` | GitHub Copilot CLI (plugin manifest: `skills` = owner folders + workflows dir, `agents` = that one directory, `hooks` = Copilot-format hooks) |
 | `.github/plugin/marketplace.json` | GitHub Copilot CLI (`copilot plugin marketplace add`, update detection) |
 | `skills\|agents\|workflows/<folder>/README.md` (21 files) | humans |
 | `<!-- catalog:start -->`/`<!-- catalog:end -->` block in `README.md` | humans |
@@ -94,6 +94,13 @@ CLI has no user-invocation dialect; the flag hides a skill from the model *and* 
 `description` must say plainly it runs only when asked. Workflows always install as
 user-invoked skills.
 
+`session-start: true` (skills only) = run before the first answer of every session. Copilot
+adapter: also writes `<instructions dir>/<name>.instructions.md` (`~/.copilot/instructions/` or
+`.github/instructions/`) telling the model to run it and *begin the reply* with what it prints
+— a model-invoked "once per session" skill alone ran in only some sessions, and "relay" alone
+got the output dropped (`copilot-facts.md` §5). Claude: nothing extra (plugin `SessionStart`
+hook). `catalog-freshness` is the one such skill.
+
 `platforms:` carries per-target overrides, only value `skip` (`copilot: skip`, `claude:
 skip`). Frontmatter is one level deep: scalars, lists of scalars, lists of single-key maps
 (workflow `steps`) — no other shape parses.
@@ -132,9 +139,9 @@ so an installed bundle is never missing a requirement.
 | 6 | Every name in `requires:`, `skills:`, `steps:` and in a bundle resolves (and names are unique across kinds) | `checkCatalog` |
 | 7 | A bundle naming a unit also names its requirements | `checkCatalog` |
 | 8 | The `shared` rule | `checkCatalog` |
-| 9 | The release version moves on every user-visible change | **`azure-pipelines.yml` (Azure DevOps) or its twin `.github/workflows/release.yml` (GitHub Actions), in two halves.** The PR build computes the version the PR will release (`scripts/next-version.js`: highest `v*` tag on `main` with the same major.minor → patch + 1; a new major.minor in `package.json` → `X.Y.0`), writes it into `package.json`, rebuilds every manifest and commits `release: prepare vX.Y.Z` to the PR's **source** branch — never to `main`. After the merge the `main` build verifies the artifacts and tags the commit `vX.Y.Z`. Humans bump only major.minor (set `package.json` to `1.1.0` in the PR; it releases as `1.1.0`). Claude and Copilot compare the manifest version with the installed copy to decide whether users see an update; `engcat check` and `catalog-freshness` read the `v*` tags. Branch policy must require this build and expire it when `main` changes (GitHub: required `prepare` check plus "Require branches to be up to date before merging"), so two PRs cannot land the same version |
+| 9 | The release version moves on every user-visible change | **`azure-pipelines.yml`, in two halves.** The PR build computes the version the PR will release (`scripts/next-version.js`: highest `v*` tag on `main` with the same major.minor → patch + 1; a new major.minor in `package.json` → `X.Y.0`), writes it into `package.json`, rebuilds every manifest and commits `release: prepare vX.Y.Z` to the PR's **source** branch — never to `main`. After the merge the `main` build verifies the artifacts and tags the commit `vX.Y.Z`. Humans bump only major.minor (set `package.json` to `1.1.0` in the PR; it releases as `1.1.0`). Claude and Copilot compare the manifest version with the installed copy to decide whether users see an update; `engcat check` and `catalog-freshness` read the `v*` tags. Branch policy must require this build and expire it when `main` changes, so two PRs cannot land the same version |
 | 10 | No secret in any file the catalog ships or writes | `checkCatalog` scans every unit file and bundle for key/token patterns |
-| 11 | Every `evals/<group>` names a unit that ships, and every hook has a source with both script twins and a contract fixture | `checkEvalGroups` (via `checkCatalog`), `scanHooks` at build time, `test/hooks.test.js` |
+| 11 | Every `evals/<group>` names a unit that ships, and every hook has a source with both script twins and a contract fixture; a deny hook is `PreToolUse`-only, fails open, and ships to Copilot only after a live capture | `checkEvalGroups` (via `checkCatalog`), `scanHooks` at build time (`denies`, `matcher`, the Copilot capture gate), `test/hooks.test.js` (incl. the fail-open probe in `test/hooks/deny-probe/`) |
 
 `npm run build` exits non-zero on any error and refuses to write an empty catalog. A `⚠`
 is a defect in a source; fix the unit or bundle, never the generated file.
@@ -193,25 +200,53 @@ into that script** — it is a hand-kept exception here, not a bug to fix.
 ## Hooks
 
 One hand-written source per hook, `hooks/<name>.json`: `{ name, description, event, script,
-args, emitsContext, timeoutSec, platforms }`. `script` = path without extension: `.sh` twin
-required, `.ps1` twin required when shipped to Copilot. `npm run build` renders both
-manifests (`lib/hooks.js`), mapping event names: `SessionStart`→`sessionStart`,
+args, emitsContext, denies, matcher, timeoutSec, platforms }`. `script` = path without
+extension: `.sh` twin required, `.ps1` twin required when shipped to Copilot. `npm run build`
+renders both manifests (`lib/hooks.js`), mapping event names: `SessionStart`→`sessionStart`,
 `SessionEnd`→`sessionEnd`, `UserPromptSubmit`→`userPromptSubmitted`,
 `PreToolUse`→`preToolUse`, `PostToolUse`→`postToolUse`. No Copilot equivalent →
 `"platforms": ["claude"]`.
+
+The rule (rationale: `DESIGN.md` §15.3). Context hooks (`SessionStart`, `UserPromptSubmit`,
+`PostToolUse`) inform. They are best-effort, and nothing may depend on their message
+arriving. A plugin has **one** context-emitting `SessionStart` hook; anything else that wants
+a session line joins it. A `PreToolUse` hook may deny, but only a narrow invariant that can be
+decided from the tool input and local git state, with no network and no session memory. A
+deny hook fails open on every internal error and when its runtime is absent. The **generated
+command** carries that guarantee, not just the script. A deny hook ships to Copilot only once
+its deny shape has a live capture in `copilot-facts.md` §6.
+`scanHooks` enforces what is mechanical: a second context-emitting `SessionStart` hook, a
+`denies` hook off `PreToolUse`, and a Copilot deny hook before the capture are build errors.
 
 `emitsContext: true` = stdout is meant to be read. Claude: plain stdout on `SessionStart`
 becomes context. Copilot: stdout must be JSON, message in `additionalContext`, plain text is
 dropped. One script emits both shapes; only the Copilot render gets the JSON flag.
 Side-effect-only hooks omit the field. Arrival is never guaranteed: on Copilot, two hooks
 answering the same event with `additionalContext` both run and log, **neither** reaches the
-model (`copilot-facts.md` §6.5, rationale: `DESIGN.md` §15.3) — a hook must inform, never
-enforce; nothing may depend on a session message being read.
+model (`copilot-facts.md` §6.5).
 
-Every hook needs `test/hooks/<event>.<script basename>.json` — scenarios with setup +
-expected say/cost/write. `test/hooks.test.js` runs each scenario through every platform's
-generated command (unwrapping Copilot's JSON first) — a hook without a fixture fails the
-suite. New hook = one source file + one fixture, zero code changes.
+`denies: true` (`PreToolUse` only) = the hook may deny a tool call. It denies by printing the
+JSON decision and exiting 0: Claude's `hookSpecificOutput.permissionDecision` shape by
+default, Copilot's flat `permissionDecision` when its render passes `--copilot` / `-Copilot`.
+The generated command always exits 0 (`…; exit 0`, PowerShell `try { … } catch { }; exit 0`):
+on Copilot any non-zero exit denies (`copilot-facts.md` §4.1), so a missing `node`, script or
+`cd` target, or a script that throws, would otherwise block every call. A script must never
+deny by exit code. The loader refuses `denies` with `copilot` in `platforms` until
+`COPILOT_DENY_CAPTURED` in `lib/hooks.js` is set by a live capture.
+
+`matcher` (`PreToolUse`/`PostToolUse` only) = a list of **Claude** tool names, e.g.
+`["Edit", "Write"]`. Without it the hook spawns on every tool call. Claude renders it as
+written (`Edit|Write`); Copilot matches runtime names only (`copilot-facts.md` §6.1), so the
+render maps each name (`COPILOT_TOOLS` in `lib/hooks.js`, from §4): `Bash`→`bash|powershell`,
+`Write`→`create`, `Edit`→`edit|str_replace_editor|apply_patch`, `Read`→`view`,
+`Grep`→`grep|rg`, `Glob`→`glob`, … A name with no runtime equivalent is refused for a hook that
+ships to Copilot.
+
+Every hook needs `test/hooks/<event>.<script basename>.json` — scenarios with setup, optional
+`stdin` (one payload, or `{ claude, copilot }`), optional `platforms`, and expected
+say/cost/write or, for a deny hook, `decision` (`deny`/`allow`) + `reason`.
+`test/hooks.test.js` runs each scenario through every platform's generated command
+(unwrapping Copilot's JSON first) — a hook without a fixture fails the suite. New hook = one source file + one fixture, zero code changes.
 
 That machinery is for shipped hooks. Two **dev-side** pairs run on this repo itself —
 hand-written, installed nowhere, outside the generator, cross-checked by
@@ -225,14 +260,16 @@ hand-written, installed nowhere, outside the generator, cross-checked by
   `Edit|Write`); stdout must be JSON (`additionalContext`); file loads only from a
   Copilot-trusted folder (per-machine, unsettable by this repo). Schema: `copilot-facts.md`
   §4; live captures: §6.
-- **`.claude/hooks/block-generated.js`** + Copilot twin — the one dev-side hook that **is**
-  enforcement: `PreToolUse`/`preToolUse`, same path list both platforms, `exit 2` denies an
+- **`.claude/hooks/block-generated.js`** + Copilot twin — the one dev-side deny hook:
+  `PreToolUse`/`preToolUse`, same path list both platforms, JSON decision + `exit 2` denies an
   Edit/Write to a wholesale-generated file (`catalog.json`, the four plugin manifests,
-  `hooks/hooks.json`, `.copilot-plugin/{agents/*.agent.md,hooks.json}`, the 21 owner-folder
-  `README.md`) — never the generated *blocks* inside hand-written files (those rely on
+  `hooks/hooks.json`, `.copilot-plugin/{agents/*.agent.md,hooks.json,workflows/*/SKILL.md}`,
+  `.claude-workflows/*/SKILL.md`, the 21 owner-folder `README.md`) — never the generated *blocks* inside hand-written files (those rely on
   `npm run check`). Same silent-failure modes as the reminder pair, plus: Copilot's
   `preToolUse` deny shape (`copilot-facts.md` §4.1) is doc-sourced only, not live-captured —
-  re-verify before trusting on a materially newer CLI.
+  re-verify before trusting on a materially newer CLI. Fails open: Claude blocks only on exit
+  2 (and reads the JSON reason then, §4.2), and `.github/hooks/block-generated.json` passes
+  exit 2 through and turns every other exit into 0 — Node itself never exits 2.
 
 Claude Code: the `PreToolUse` entry in `.claude/settings.json` carries an `if` glob mirroring
 the script's own path list, evaluated in-process — a non-matching edit never spawns Node. The
@@ -274,7 +311,9 @@ catalog into a fake `HOME` once per arm (`scripts/eval/copilot.js`, no CLI, no
 `--plugin-dir`), grades via `scripts/eval/graders.js`, judged by headless `claude -p` on both
 targets (`judge.js`, one judge pinned in `evals/eval.config.json`). Each run → `RunRecord` in
 `evals/results/<run-id>/runs.jsonl` (git-ignored); rate-limit/auth/partial runs are
-**invalid**, excluded, never scored as failure. `scripts/eval/stats.js` reduces a cell to
+**invalid**, excluded, never scored as failure. How a run ended is classified, not assumed: a
+Copilot run the wall-clock timer kills (its only turn limit) is a **`stall`** — outcome and
+`invalid.kind` both `stall` (`scripts/eval/copilot.js`), excluded like the others, not a fail. `scripts/eval/stats.js` reduces a cell to
 per-case deltas, a seeded paired bootstrap CI (Bonferroni across cells), guardrail ratios.
 `--record <slug> --hypothesis "…"` commits the verdict to `evals/experiments/`,
 hypothesis/δ fixed pre-run.
@@ -295,8 +334,11 @@ rule table + `test/eval-stats.test.js` are authoritative; change there first. `m
 confidence threshold, not a target — below it, verdict is **Not proven** (a result, not a
 gap).
 
-Prefer grader types `regex`, `tool_used`, `tool_order`, `file_exists`; `llm` only for short
-outputs with explicit PASS/FAIL rubrics. A skill `description` change is a behaviour change —
+**Grade outcomes, not paths.** Following a process is not a quality measure: a grader checks
+what the run produced (the file, the reply, the decision), not the route taken. Prefer grader
+types `regex`, `tool_used`, `file_exists`; `tool_order` only where order is the behaviour
+under test (a preflight before the call it guards); `llm` only for short outputs with explicit
+PASS/FAIL rubrics. A skill `description` change is a behaviour change —
 re-run its trigger cases.
 
 ## Adapted third-party work
@@ -333,6 +375,7 @@ lib/adapters/            claude.js, copilot.js
 lib/receipt.js           receipt read/write
 lib/install.js           bundle resolution, planInstall, applyInstall
 lib/update.js            diffUnits, detectLocalEdits, compareVersions
+lib/legacy.js            migration from the pre-catalog QA assistant: retired skills, old state folder
 lib/hooks.js             hook sources → both hook manifests
 scripts/build.js         npm run build / npm run check
 scripts/eval.js          npm run eval — lint, static, affected, compare

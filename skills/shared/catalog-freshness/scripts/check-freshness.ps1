@@ -6,6 +6,7 @@ param(
     [switch]$Quiet,
     [switch]$Force,
     [switch]$Json,
+    [switch]$Version,
     [int]$Days = 7
 )
 
@@ -14,21 +15,73 @@ $ErrorActionPreference = 'SilentlyContinue'
 # One message, two shapes. Claude adds a SessionStart hook's plain stdout to the session as
 # context; Copilot reads the same stdout as JSON and takes the line from `additionalContext`,
 # dropping plain text without a word. -Json picks the second (copilot-facts.md Sec 6).
-function Emit([string]$Message) {
-    if ($Json) {
-        Write-Output ((@{ additionalContext = $Message } | ConvertTo-Json -Compress))
-    } else {
-        Write-Output $Message
-    }
-}
+# Messages are collected and printed once by Finish: Copilot reads exactly one JSON object.
+$script:Messages = @()
+function Emit([string]$Message) { $script:Messages += $Message }
 
 function Say([string]$Message) {
     if (-not $Quiet) { Emit $Message }
 }
 
+function Finish {
+    if ($script:Messages.Count -gt 0) {
+        $text = $script:Messages -join "`n"
+        if ($Json) { Write-Output ((@{ additionalContext = $text } | ConvertTo-Json -Compress)) }
+        else { Write-Output $text }
+    }
+    exit 0
+}
+
 $homeDir = $env:ENGCAT_HOME
 if ([string]::IsNullOrEmpty($homeDir)) {
     $homeDir = $HOME
+}
+
+# Not about freshness, but this is the one script every session runs first. When the QA
+# skill is installed beside this one on Windows and no Azure DevOps project is configured,
+# say so every session, so the first conversation sets one up instead of the first work
+# item failing. Located without a relative path: the skills root is two levels up.
+$skillsRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+if (-not $Version -and $env:OS -eq 'Windows_NT' -and (Test-Path -LiteralPath (Join-Path (Join-Path $skillsRoot 'qa-ado-work-item') 'SKILL.md'))) {
+    $adoConfig = Join-Path (Join-Path $homeDir '.ado-credentials') 'config.json'
+    $hasProject = $false
+    if (Test-Path -LiteralPath $adoConfig) {
+        try { $hasProject = @((Get-Content -Raw -LiteralPath $adoConfig | ConvertFrom-Json).contexts | Where-Object { $_.organization }).Count -gt 0 } catch { }
+    }
+    if (-not $hasProject) {
+        Emit 'No Azure DevOps project is connected yet, so bugs cannot be filed here. Send me a link to your board (any board, backlog or sprint page) and, if you have them, links to the code, and I will connect it.'
+    }
+}
+
+# Local project state line (memory pointers/hook and ado-board map versions): at most once a day
+# per project, silent on any error, and separate from the 7-day remote freshness interval.
+$stateHelper = Join-Path $PSScriptRoot 'project-state.js'
+if (-not $Version -and (Test-Path -LiteralPath $stateHelper) -and (Get-Command node -ErrorAction SilentlyContinue)) {
+    try {
+        $stateLine = & node $stateHelper --hours 24 2>$null
+        if ($stateLine) { Emit (($stateLine | Out-String).Trim()) }
+    } catch { }
+}
+
+# Board line (ado-board, DESIGN Sec 14): when ado-board is installed beside this skill and the
+# project has a state map, at most once a day, "N items have not moved". `nudge --due` decides
+# without network whether a check is due; only then is the Windows PAT unwrapped, into this
+# process's environment alone, and removed again. Silent on any problem.
+$boardScript = Join-Path (Join-Path (Join-Path $skillsRoot 'ado-board') 'scripts') 'board.js'
+if (-not $Version -and (Test-Path -LiteralPath $boardScript) -and (Get-Command node -ErrorAction SilentlyContinue)) {
+    try {
+        & node $boardScript nudge --hours 24 --due 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            $hadPat = -not [string]::IsNullOrEmpty($env:AZURE_DEVOPS_EXT_PAT)
+            if (-not $hadPat -and $env:OS -eq 'Windows_NT' -and $env:USERPROFILE) {
+                $getPat = Join-Path (Join-Path $env:USERPROFILE '.ado-credentials') 'get-pat.ps1'
+                if (Test-Path -LiteralPath $getPat) { try { $env:AZURE_DEVOPS_EXT_PAT = & $getPat 'Password' } catch { } }
+            }
+            $boardLine = & node $boardScript nudge --hours 24 2>$null
+            if (-not $hadPat) { Remove-Item Env:AZURE_DEVOPS_EXT_PAT -ErrorAction SilentlyContinue }
+            if ($boardLine) { Emit (($boardLine | Out-String).Trim()) }
+        }
+    } catch { }
 }
 
 $receiptCandidates = @(
@@ -41,7 +94,7 @@ foreach ($cand in $receiptCandidates) {
 }
 if (-not $receiptPath) {
     Say 'engineering-catalog is not installed here (no receipt).'
-    exit 0
+    Finish
 }
 
 $statePath = Join-Path $homeDir '.engineering-catalog/freshness.json'
@@ -51,7 +104,7 @@ try {
     $receipt = Get-Content -Raw -LiteralPath $receiptPath | ConvertFrom-Json
 } catch {
     Say 'engineering-catalog receipt is unreadable.'
-    exit 0
+    Finish
 }
 
 $firstInstall = $null
@@ -60,11 +113,21 @@ if ($receipt.installs -and $receipt.installs.Count -gt 0) {
 }
 if (-not $firstInstall) {
     Say 'engineering-catalog is not installed here (no receipt).'
-    exit 0
+    Finish
 }
 
 $source = $firstInstall.source
 $installed = $firstInstall.catalogVersion
+
+# "Which version is installed?" answered from the receipt alone: no network, no interval.
+if ($Version) {
+    # PowerShell 7 turns an ISO date in JSON into a [datetime]; 5.1 keeps the string.
+    $installedOn = $firstInstall.date
+    if ($installedOn -is [datetime]) { $installedOn = $installedOn.ToUniversalTime().ToString('yyyy-MM-dd') }
+    else { $installedOn = "$installedOn"; if ($installedOn.Length -ge 10) { $installedOn = $installedOn.Substring(0, 10) } }
+    Emit "engineering-catalog $installed is installed (on $installedOn, from $source)."
+    Finish
+}
 
 if (-not $Force -and (Test-Path -LiteralPath $statePath -PathType Leaf)) {
     $state = $null
@@ -75,7 +138,7 @@ if (-not $Force -and (Test-Path -LiteralPath $statePath -PathType Leaf)) {
         if ($lastChecked) {
             $elapsed = [DateTimeOffset]::UtcNow - $lastChecked.ToUniversalTime()
             if ($elapsed.TotalDays -lt $Days) {
-                exit 0
+                Finish
             }
         }
     }
@@ -108,14 +171,14 @@ $stateOut = [ordered]@{ lastChecked = $nowIso; latest = if ($latest) { $latest }
 ($stateOut | ConvertTo-Json -Compress) | Set-Content -LiteralPath $statePath
 
 if (-not $latest) {
-    Say "engineering-catalog $installed — could not read tags from $source."
-    exit 0
+    Say "engineering-catalog $installed - could not read tags from $source."
+    Finish
 }
 
 $newest = @($installed, $latest) | Sort-Object { [version]$_ } | Select-Object -Last 1
 if ($newest -ne $installed) {
-    Emit "engineering-catalog $installed → $latest available. Update: npx git+$source update"
+    Emit "engineering-catalog $installed -> $latest available. Update: npx git+$source update"
 } else {
     Say "engineering-catalog $installed is current."
 }
-exit 0
+Finish

@@ -1,0 +1,37 @@
+{
+  "id": "SessionStart.check-freshness",
+  "scenarios": [
+    {
+      "name": "no receipt — silent and harmless",
+      "setup": { "fakeGitTags": [] },
+      "expect": { "exit": 0, "stdout": "empty", "maxMs": 10000, "maxOutputChars": 0 }
+    },
+    {
+      "name": "a newer release is announced even under --quiet",
+      "setup": { "receipt": { "catalogVersion": "1.0.0", "source": "https://example/repo" }, "fakeGitTags": ["v1.0.0", "v1.1.0"] },
+      "expect": { "exit": 0, "stdout": "1\\.0\\.0 (→|->) 1\\.1\\.0 available", "maxMs": 10000, "maxOutputChars": 300, "writes": [".engineering-catalog/freshness.json"] }
+    },
+    {
+      "name": "current version stays silent",
+      "setup": { "receipt": { "catalogVersion": "1.1.0", "source": "https://example/repo" }, "fakeGitTags": ["v1.1.0"] },
+      "expect": { "exit": 0, "stdout": "empty", "maxMs": 10000, "maxOutputChars": 0 }
+    },
+    {
+      "name": "legacy project state gets one local upgrade hint",
+      "setup": {
+        "repo": { "branch": "main", "remote": "https://dev.azure.com/acme/Orion/_git/api" },
+        "receipt": { "catalogVersion": "1.0.0", "source": "https://example/repo" },
+        "homeFiles": {
+          ".engineering-catalog/freshness.json": "{\"lastChecked\":\"2099-01-01T00:00:00Z\",\"latest\":\"1.0.0\"}"
+        },
+        "projectFiles": {
+          "CLAUDE.md": "<!-- engineering-catalog:memory:start -->\nold\n<!-- engineering-catalog:memory:end -->\n",
+          "AGENTS.md": "<!-- engineering-catalog:memory:start v=1 -->\ncurrent\n<!-- engineering-catalog:memory:end -->\n",
+          ".github/copilot-instructions.md": "<!-- engineering-catalog:memory:start v=1 -->\ncurrent\n<!-- engineering-catalog:memory:end -->\n",
+          ".git/hooks/post-commit": "#!/bin/sh\n# engineering-catalog:memory:start\nold\n# engineering-catalog:memory:end\n"
+        }
+      },
+      "expect": { "exit": 0, "stdout": "^project state behind: run memory-init$", "maxMs": 10000, "maxOutputChars": 80, "writes": [".engineering-catalog/project-state.json"] }
+    }
+  ]
+}

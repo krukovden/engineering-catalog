@@ -4,9 +4,10 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 
 const SCRIPT = path.join(__dirname, '..', 'skills/shared/memory-init/scripts/memory-init.js');
+const { POINTER_VERSION, HOOK_VERSION, markerVersion, POINTER_MARKER, HOOK_MARKER } = require(path.join(__dirname, '..', 'skills/shared/memory-init/scripts/memory-init.js'));
 function repo() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'init-'));
   execFileSync('git', ['init', '-q'], { cwd: dir });
@@ -14,6 +15,7 @@ function repo() {
   return dir;
 }
 const run = (dir, extra = [], home = fs.mkdtempSync(path.join(os.tmpdir(), 'h-'))) => JSON.parse(execFileSync('node', [SCRIPT, '--project', dir, '--json', ...extra], { env: { ...process.env, ENGCAT_HOME: home } }).toString());
+const runRaw = (dir, extra = [], home = fs.mkdtempSync(path.join(os.tmpdir(), 'h-'))) => spawnSync('node', [SCRIPT, '--project', dir, '--json', ...extra], { env: { ...process.env, ENGCAT_HOME: home }, encoding: 'utf8' });
 
 test('first run does every step; second run keeps them', () => {
   const dir = repo();
@@ -23,7 +25,7 @@ test('first run does every step; second run keeps them', () => {
   const index = fs.readFileSync(path.join(dir, 'memory/index.md'), 'utf8');
   assert.ok(index.includes('reconciled-sha: none') && index.includes('store: committed'));
   const claude = fs.readFileSync(path.join(dir, 'CLAUDE.md'), 'utf8');
-  assert.ok(claude.startsWith('# Rules') && claude.includes('<!-- engineering-catalog:memory:start -->') && claude.includes('memory/index.md'));
+  assert.ok(claude.startsWith('# Rules') && claude.includes(`<!-- engineering-catalog:memory:start v=${POINTER_VERSION} -->`) && claude.includes('memory/index.md'));
   assert.ok(fs.readFileSync(path.join(dir, '.github/copilot-instructions.md'), 'utf8').includes('memory/index.md'));
   assert.ok(fs.readFileSync(path.join(dir, 'AGENTS.md'), 'utf8').includes('memory/index.md'));
   const hook = path.join(dir, '.git/hooks/post-commit');
@@ -32,6 +34,7 @@ test('first run does every step; second run keeps them', () => {
   assert.ok(hookText.includes('git rev-parse --show-toplevel'), hookText);
   assert.ok(hookText.includes('/memory/.pending'), hookText);
   assert.ok(!hookText.includes(dir), `hook hard-codes ${dir}`);
+  assert.equal(markerVersion(hookText, HOOK_MARKER), HOOK_VERSION);
   assert.equal(fs.statSync(hook).mode & 0o111, 0o111);
   const store = JSON.parse(fs.readFileSync(path.join(dir, 'memory/.store.json'), 'utf8'));
   assert.equal(store.store, 'committed');
@@ -59,6 +62,22 @@ test('an existing post-commit hook keeps its own content', () => {
   const hook = fs.readFileSync(path.join(dir, '.git/hooks/post-commit'), 'utf8');
   assert.ok(hook.includes('echo mine'));
   assert.equal(hook.split('engineering-catalog:memory:start').length, 2);
+});
+
+test('legacy pointer and hook markers upgrade in place', () => {
+  const dir = repo();
+  fs.mkdirSync(path.join(dir, '.github'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'CLAUDE.md'), '# Rules\n\n<!-- engineering-catalog:memory:start -->\nold pointer\n<!-- engineering-catalog:memory:end -->\n');
+  fs.writeFileSync(path.join(dir, 'AGENTS.md'), '<!-- engineering-catalog:memory:start -->\nold pointer\n<!-- engineering-catalog:memory:end -->\n');
+  fs.writeFileSync(path.join(dir, '.github/copilot-instructions.md'), 'Intro\n\n<!-- engineering-catalog:memory:start -->\nold pointer\n<!-- engineering-catalog:memory:end -->\n');
+  fs.writeFileSync(path.join(dir, '.git/hooks/post-commit'), '#!/bin/sh\n# engineering-catalog:memory:start\ngit rev-parse HEAD >> "/tmp/old/.pending"\n# engineering-catalog:memory:end\n');
+  const out = run(dir);
+  assert.equal(out.steps.find((s) => s.name === 'pointers').state, 'done');
+  assert.equal(out.steps.find((s) => s.name === 'hook').state, 'done');
+  assert.equal(markerVersion(fs.readFileSync(path.join(dir, 'CLAUDE.md'), 'utf8'), POINTER_MARKER), POINTER_VERSION);
+  assert.equal(markerVersion(fs.readFileSync(path.join(dir, 'AGENTS.md'), 'utf8'), POINTER_MARKER), POINTER_VERSION);
+  assert.equal(markerVersion(fs.readFileSync(path.join(dir, '.github/copilot-instructions.md'), 'utf8'), POINTER_MARKER), POINTER_VERSION);
+  assert.equal(markerVersion(fs.readFileSync(path.join(dir, '.git/hooks/post-commit'), 'utf8'), HOOK_MARKER), HOOK_VERSION);
 });
 
 test('local store lives outside the project and pointers use the absolute path', () => {
@@ -97,4 +116,39 @@ test('a file that only mentions the markers in prose gets the block appended, no
   assert.equal(out.split('## Project memory').length, 2, 'block appended once');
   run(dir);
   assert.equal(fs.readFileSync(path.join(dir, 'CLAUDE.md'), 'utf8').split('## Project memory').length, 2, 'still once');
+});
+
+test('a pointer write failure leaves legacy markers in place and stops before later steps', () => {
+  const dir = repo();
+  fs.mkdirSync(path.join(dir, '.github', 'copilot-instructions.md'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'CLAUDE.md'), '# Rules\n\n<!-- engineering-catalog:memory:start -->\nold pointer\n<!-- engineering-catalog:memory:end -->\n');
+  fs.writeFileSync(path.join(dir, 'AGENTS.md'), '<!-- engineering-catalog:memory:start -->\nold pointer\n<!-- engineering-catalog:memory:end -->\n');
+  const result = runRaw(dir);
+  assert.equal(result.status, 1, result.stderr);
+  const out = JSON.parse(result.stdout);
+  assert.equal(out.steps.at(-1).name, 'pointers');
+  assert.equal(out.steps.at(-1).state, 'error');
+  assert.equal(markerVersion(fs.readFileSync(path.join(dir, 'CLAUDE.md'), 'utf8'), POINTER_MARKER), 0);
+  assert.equal(markerVersion(fs.readFileSync(path.join(dir, 'AGENTS.md'), 'utf8'), POINTER_MARKER), 0);
+  assert.equal(fs.existsSync(path.join(dir, '.gitignore')), false);
+});
+
+// chmod cannot make a directory read-only for root (the self-hosted CI agent runs as root).
+test('a hook write failure leaves the legacy hook marker in place', { skip: process.platform === 'win32' || process.getuid() === 0 }, () => {
+  const dir = repo();
+  run(dir);
+  const hook = path.join(dir, '.git/hooks/post-commit');
+  fs.writeFileSync(hook, '#!/bin/sh\n# engineering-catalog:memory:start\ngit rev-parse HEAD >> "/tmp/old/.pending"\n# engineering-catalog:memory:end\n');
+  fs.chmodSync(path.join(dir, '.git/hooks'), 0o555);
+  try {
+    const result = runRaw(dir);
+    assert.equal(result.status, 1, result.stderr);
+    const out = JSON.parse(result.stdout);
+    assert.equal(out.steps.at(-1).name, 'hook');
+    assert.equal(out.steps.at(-1).state, 'error');
+    assert.equal(markerVersion(fs.readFileSync(hook, 'utf8'), HOOK_MARKER), 0);
+    assert.equal(fs.readFileSync(hook, 'utf8').includes('/tmp/old/.pending'), true);
+  } finally {
+    fs.chmodSync(path.join(dir, '.git/hooks'), 0o755);
+  }
 });
