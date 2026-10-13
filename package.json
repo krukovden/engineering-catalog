@@ -21,7 +21,7 @@
   "scripts": {
     "build": "node scripts/build.js",
     "check": "node scripts/build.js --check",
-    "test": "node --test test/*.test.js",
+    "test": "t=$(mktemp -d) && before=$(find \"$t\" -mindepth 1 -maxdepth 1 ! -name 'node-compile-cache' | wc -l | tr -d ' ') && TMPDIR=\"$t\" node --test test/*.test.js; status=$?; after=$(find \"$t\" -mindepth 1 -maxdepth 1 ! -name 'node-compile-cache' | wc -l | tr -d ' '); echo \"before=${before} after=${after}\"; node test/tmpdir-leak-guard.js \"$t\"; guard_status=$?; if [ \"$status\" -ne 0 ] || [ \"$guard_status\" -ne 0 ]; then exit 1; fi",
     "eval": "node scripts/eval.js",
     "e2e:install": "node scripts/e2e/install-smoke.js"
   },

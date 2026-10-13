@@ -1,4 +1,5 @@
 'use strict';
+require('./temp-cleanup');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { withDisableModelInvocation, renderWorkflowSkill, managedBlock, agentMarkdown } = require('../lib/render');

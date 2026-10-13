@@ -1,4 +1,5 @@
 'use strict';
+require('./temp-cleanup');
 // project-workspace: temp git repositories with a local bare "remote"; no network.
 const test = require('node:test');
 const assert = require('node:assert/strict');

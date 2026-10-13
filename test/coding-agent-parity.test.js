@@ -1,4 +1,5 @@
 'use strict';
+require('./temp-cleanup');
 // coding-agent-parity is a repo-local dev skill (.claude/skills/, not skills/<owner>/<name>/):
 // it has no `.claude-plugin/plugin.json`, so it doesn't qualify as a `claude plugin eval`
 // target (a manifest-less SKILL.md is a "plain skill", not a "skills-directory plugin" —

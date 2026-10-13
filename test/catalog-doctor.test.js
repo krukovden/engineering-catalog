@@ -1,4 +1,5 @@
 'use strict';
+require('./temp-cleanup');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -28,9 +29,18 @@ function tempHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'doctor-home-'));
 }
 
-test('copilotCollision fails when plugin and engcat copilot installs coexist', () => {
+function cleanupDirs(t, ...dirs) {
+  t.after(() => {
+    for (const dir of dirs) {
+      if (dir) fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('copilotCollision fails when plugin and engcat copilot installs coexist', (t) => {
   const root = tempRoot();
   const home = tempHome();
+  cleanupDirs(t, root, home);
   write(path.join(home, '.copilot', 'config.json'), JSON.stringify({ installedPlugins: ['engineering-catalog@engineering-catalog'], trustedFolders: [root] }));
   write(path.join(root, '.engineering-catalog', 'receipt.json'), JSON.stringify({ schema: 1, installs: [{ target: 'copilot', scope: 'local', catalogVersion: '1.0.6' }] }));
   const check = doctor.copilotCollision(root, home);
@@ -38,8 +48,9 @@ test('copilotCollision fails when plugin and engcat copilot installs coexist', (
   assert.match(check.detail, /plugin and as a local engcat Copilot install/);
 });
 
-test('memoryState warns on missing pointers and a backed-up pending queue', () => {
+test('memoryState warns on missing pointers and a backed-up pending queue', (t) => {
   const root = tempRoot();
+  cleanupDirs(t, root);
   fs.unlinkSync(path.join(root, 'AGENTS.md'));
   write(path.join(root, 'memory', '.pending'), 'a\nb\nc\n');
   const check = doctor.memoryState(root, 2);
@@ -48,8 +59,9 @@ test('memoryState warns on missing pointers and a backed-up pending queue', () =
   assert.match(check.detail, /memory\/\.pending has 3 entries/);
 });
 
-test('sessionStartHooks warns on repository-owned sessionStart hooks', () => {
+test('sessionStartHooks warns on repository-owned sessionStart hooks', (t) => {
   const root = tempRoot();
+  cleanupDirs(t, root);
   write(path.join(root, '.github', 'hooks', 'speak.json'), JSON.stringify({ version: 1, hooks: { sessionStart: [{ type: 'command', command: 'echo hi' }] } }));
   write(path.join(root, '.claude', 'settings.json'), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'echo hi' }] }] } }));
   const check = doctor.sessionStartHooks(root);
@@ -58,9 +70,10 @@ test('sessionStartHooks warns on repository-owned sessionStart hooks', () => {
   assert.match(check.detail, /\.claude\/settings\.json/);
 });
 
-test('collectChecks reports ok for a healthy local setup', () => {
+test('collectChecks reports ok for a healthy local setup', (t) => {
   const root = tempRoot();
   const home = tempHome();
+  cleanupDirs(t, root, home);
   write(path.join(home, '.copilot', 'config.json'), JSON.stringify({ trustedFolders: [root], installedPlugins: [] }));
   const checks = doctor.collectChecks(
     { root, home, pendingLimit: 20 },
@@ -104,9 +117,10 @@ test('stripJsonComments strips full-line // and /* */ comments without touching 
   assert.equal(parsedComplex.nested.key, 'value');
 });
 
-test('copilotTrusted parses JSONC ~/.copilot/config.json with comments and recognizes trusted folder', () => {
+test('copilotTrusted parses JSONC ~/.copilot/config.json with comments and recognizes trusted folder', (t) => {
   const root = tempRoot();
   const home = tempHome();
+  cleanupDirs(t, root, home);
   const fixturePath = path.join(__dirname, 'fixtures', 'catalog-doctor', 'copilot-config.jsonc');
   const rawFixture = fs.readFileSync(fixturePath, 'utf8');
   // Include root in the JSONC trustedFolders
@@ -119,8 +133,9 @@ test('copilotTrusted parses JSONC ~/.copilot/config.json with comments and recog
   assert.match(check.detail, /Repository path is present in Copilot trustedFolders/);
 });
 
-test('hasPointerBlock and memoryState recognize both legacy and versioned pointer blocks', () => {
+test('hasPointerBlock and memoryState recognize both legacy and versioned pointer blocks', (t) => {
   const root = tempRoot();
+  cleanupDirs(t, root);
 
   // 1. Legacy format
   write(path.join(root, 'CLAUDE.md'), '<!-- engineering-catalog:memory:start -->\nlegacy content\n<!-- engineering-catalog:memory:end -->\n');
@@ -146,9 +161,10 @@ test('hasPointerBlock and memoryState recognize both legacy and versioned pointe
   assert.match(checkWarn.detail, /missing pointers: CLAUDE\.md/);
 });
 
-test('memoryState follows a pointer to a local memory store before counting pending entries', () => {
+test('memoryState follows a pointer to a local memory store before counting pending entries', (t) => {
   const root = tempRoot();
   const memoryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doctor-memory-'));
+  cleanupDirs(t, root, memoryDir);
   write(path.join(memoryDir, '.pending'), 'a\nb\nc\n');
   const pointer = [
     '<!-- engineering-catalog:memory:start v=1 -->',
@@ -168,8 +184,9 @@ test('memoryState follows a pointer to a local memory store before counting pend
   assert.equal(check.fix, 'Drain the memory queue when the task is done.');
 });
 
-test('memoryState follows a pointer to a custom committed memory directory', () => {
+test('memoryState follows a pointer to a custom committed memory directory', (t) => {
   const root = tempRoot();
+  cleanupDirs(t, root);
   const custom = path.join(root, 'notes-memory');
   write(path.join(custom, '.pending'), 'a\nb\nc\n');
   const pointer = [
@@ -195,8 +212,9 @@ test('doctor PowerShell wrapper keeps the -Home flag without declaring $Home', (
   assert.match(script, /\$args \+= @\('--home', \$HomeDir\)/);
 });
 
-test('memoryState outside a git repository is skip, not a warning about missing pointers', () => {
+test('memoryState outside a git repository is skip, not a warning about missing pointers', (t) => {
   const plain = fs.mkdtempSync(path.join(os.tmpdir(), 'doctor-plain-'));
+  cleanupDirs(t, plain);
   const notRepo = () => { throw new Error('fatal: not a git repository'); };
   const check = doctor.memoryState(plain, 20, { git: notRepo });
   assert.equal(check.status, 'skip');
@@ -204,8 +222,9 @@ test('memoryState outside a git repository is skip, not a warning about missing 
   assert.doesNotMatch(check.detail, /missing pointers/);
 });
 
-test('adoContext: ADO_ORG first, then the Azure origin, then the one board repos.json maps', () => {
+test('adoContext: ADO_ORG first, then the Azure origin, then the one board repos.json maps', (t) => {
   const home = tempHome();
+  cleanupDirs(t, home);
   const noOrigin = () => { throw new Error('no origin'); };
   const origin = () => 'https://Contoso@dev.azure.com/Contoso/Platform/_git/api';
   assert.deepEqual(doctor.adoContext('/r', home, { ADO_ORG: 'acme', ADO_PROJECT: 'P' }, origin), { org: 'acme', project: 'P', source: 'ADO_ORG' });
@@ -221,8 +240,9 @@ test('adoContext: ADO_ORG first, then the Azure origin, then the one board repos
   assert.equal(doctor.adoContext('/r', home, {}, noOrigin), null);
 });
 
-test('collectChecks passes the known organization to the ado-credentials check', () => {
+test('collectChecks passes the known organization to the ado-credentials check', (t) => {
   const plain = fs.mkdtempSync(path.join(os.tmpdir(), 'doctor-plain-'));
+  cleanupDirs(t, plain);
   let seen;
   const checks = doctor.collectChecks(
     { root: plain, home: tempHome(), pendingLimit: 20 },
@@ -232,13 +252,19 @@ test('collectChecks passes the known organization to the ado-credentials check',
   assert.equal(checks.find((c) => c.id === 'memory-pointers').status, 'skip');
 });
 
-test('adoState: a PAT with no organization gets a fix a non-developer can follow', { skip: process.platform === 'win32' }, () => {
+test('adoState: a PAT with no organization gets a fix a non-developer can follow', { skip: process.platform === 'win32' }, (t) => {
   const saved = { ...process.env };
+  const empty = tempHome();
+  const fakeAzDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doctor-azbin-'));
+  cleanupDirs(t, empty, fakeAzDir);
+  const fakeAz = path.join(fakeAzDir, 'az');
+  fs.writeFileSync(fakeAz, '#!/usr/bin/env sh\nexit 1\n');
+  fs.chmodSync(fakeAz, 0o755);
   try {
     process.env.AZURE_DEVOPS_EXT_PAT = 'not-a-real-pat';
     delete process.env.ADO_PAT; delete process.env.ADO_ORG; delete process.env.ADO_PROJECT;
+    process.env.PATH = `${fakeAzDir}${path.delimiter}${saved.PATH || ''}`;
     // No az config: check.sh stops before any network call.
-    const empty = tempHome();
     process.env.HOME = empty;
     process.env.AZURE_CONFIG_DIR = empty;
     const check = doctor.adoState(null);
