@@ -3,6 +3,8 @@
 
 const {
   DEFAULT_STALE_DAYS,
+  DEFAULT_FIRST_RUN_DAYS,
+  DEFAULT_MAX_PR_PAGES,
   DEFAULT_THROTTLE_HOURS,
   defaultProjectStatePath,
   loadProjectState,
@@ -21,7 +23,7 @@ function usage() {
     'usage:',
     '  node ado-board.js states discover [--state-file FILE] [--choose "Type:bucket=State"]... [--non-interactive] [--json]',
     '  node ado-board.js move <id> <todo|doing|verify|done> [--comment TEXT] [--allow-idp] [--state-file FILE] [--json]',
-    '  node ado-board.js reconcile [--state-file FILE] [--stale-days N] [--throttle-hours N] [--allow-unconfigured] [--json]',
+    '  node ado-board.js reconcile [--state-file FILE] [--stale-days N] [--first-run-days N] [--max-pr-pages N] [--throttle-hours N] [--allow-unconfigured] [--json]',
   ].join('\n');
 }
 
@@ -42,6 +44,10 @@ function parse(argv) {
     else if (arg.startsWith('--choose=')) options.choose.push(arg.slice('--choose='.length));
     else if (arg === '--stale-days') options.staleDays = Number(argv[++i]);
     else if (arg.startsWith('--stale-days=')) options.staleDays = Number(arg.slice('--stale-days='.length));
+    else if (arg === '--first-run-days') options.firstRunDays = Number(argv[++i]);
+    else if (arg.startsWith('--first-run-days=')) options.firstRunDays = Number(arg.slice('--first-run-days='.length));
+    else if (arg === '--max-pr-pages') options.maxPrPages = Number(argv[++i]);
+    else if (arg.startsWith('--max-pr-pages=')) options.maxPrPages = Number(arg.slice('--max-pr-pages='.length));
     else if (arg === '--throttle-hours') options.throttleHours = Number(argv[++i]);
     else if (arg.startsWith('--throttle-hours=')) options.throttleHours = Number(arg.slice('--throttle-hours='.length));
     else if (arg === '--context') options.contextName = argv[++i];
@@ -142,6 +148,8 @@ async function main() {
       stateMap: state.stateMap,
       cwd: process.cwd(),
       staleDays: Number.isFinite(options.staleDays) ? options.staleDays : DEFAULT_STALE_DAYS,
+      firstRunDays: Number.isFinite(options.firstRunDays) && options.firstRunDays > 0 ? options.firstRunDays : DEFAULT_FIRST_RUN_DAYS,
+      maxPrPages: Number.isFinite(options.maxPrPages) && options.maxPrPages > 0 ? options.maxPrPages : DEFAULT_MAX_PR_PAGES,
       throttleHours,
       stateFile,
       projectState: state,

@@ -10,6 +10,8 @@ const readline = require('node:readline/promises');
 const STATE_FILE_VERSION = 1;
 const DEFAULT_STALE_DAYS = 7;
 const DEFAULT_THROTTLE_HOURS = 12;
+const DEFAULT_FIRST_RUN_DAYS = 14;
+const DEFAULT_MAX_PR_PAGES = 2;
 const RECONCILE_MARKER_LIMIT = 200;
 const OWN_MARKER_PREFIX = 'ado-board:';
 const CATEGORY_TO_BUCKET = {
@@ -771,10 +773,14 @@ function retryableMinClosedDate(entries = []) {
   return valid[0] ? valid[0].toISOString() : null;
 }
 
-function reconcileQueryMinTime(projectState) {
+function reconcileQueryMinTime(projectState, { now = new Date(), firstRunDays = DEFAULT_FIRST_RUN_DAYS } = {}) {
   const current = projectState?.reconcile || {};
   const retryMin = retryableMinClosedDate(current.retryablePullRequests || []);
-  if (!current.lastCompletedPrClosedDate) return retryMin;
+  if (!current.lastCompletedPrClosedDate) {
+    // No watermark yet: never walk the whole history, only PRs closed inside the floor window.
+    const floor = new Date(now.getTime() - firstRunDays * 86400000).toISOString();
+    return retryMin && retryMin > floor ? retryMin : floor;
+  }
   if (!retryMin) return current.lastCompletedPrClosedDate;
   return new Date(retryMin) < new Date(current.lastCompletedPrClosedDate)
     ? retryMin
@@ -784,7 +790,8 @@ function reconcileQueryMinTime(projectState) {
 function updateRetryablePullRequests(currentRetryable, retryableThisRun, processedThisRun) {
   const processedKeys = new Set(processedThisRun.map((entry) => entry.key));
   const pendingCurrent = (currentRetryable || []).filter((entry) => !processedKeys.has(retryPullRequestKey(entry)));
-  return mergeRetryablePullRequests(pendingCurrent, retryableThisRun);
+  const pendingThisRun = (retryableThisRun || []).filter((entry) => !processedKeys.has(retryPullRequestKey(entry)));
+  return mergeRetryablePullRequests(pendingCurrent, pendingThisRun);
 }
 
 function contiguousSuccessClosedDate(processedPullRequests, retryablePullRequests) {
@@ -843,6 +850,8 @@ async function reconcileBoard({
   stateMap,
   cwd = process.cwd(),
   staleDays = DEFAULT_STALE_DAYS,
+  firstRunDays = DEFAULT_FIRST_RUN_DAYS,
+  maxPrPages = DEFAULT_MAX_PR_PAGES,
   throttleHours = 0,
   env = process.env,
   stateFile = null,
@@ -1026,10 +1035,21 @@ async function reconcileBoard({
   const prQuery = {
     repository,
     targetRefName: branchScan.baseRef ? `refs/heads/${branchScan.baseRef.replace(/^origin\//, '')}` : null,
-    minTime: reconcileQueryMinTime(projectState),
+    minTime: reconcileQueryMinTime(projectState, { firstRunDays }),
     queryTimeRangeType: 'closed',
+    maxPages: maxPrPages,
   };
-  const prs = await transport.listCompletedPullRequests(context, prQuery);
+  const listedPrs = await transport.listCompletedPullRequests(context, prQuery);
+  const prListTruncated = listedPrs?.truncated === true;
+  // Offset paging over a live list can return the same PR on two pages.
+  const seenPrKeys = new Set();
+  const prs = [];
+  for (const pr of listedPrs) {
+    const key = completedPullRequestKey(repository, pr);
+    if (seenPrKeys.has(key)) continue;
+    seenPrKeys.add(key);
+    prs.push(pr);
+  }
   for (const pr of prs) {
     const prKey = completedPullRequestKey(repository, pr);
     if (processedPullRequestKeys.has(prKey)) continue;
@@ -1160,6 +1180,7 @@ async function reconcileBoard({
         .map((entry) => ({ branch: entry.name, sha: entry.sha, committedAt: entry.committedAt })),
       blueprintDrift: blueprintDrift(root),
       warnings: [
+        ...(prListTruncated ? [{ code: 'pr-list-truncated', message: `Completed PR list hit the ${maxPrPages}-page budget; older PRs in the window were not examined. Re-run on demand with --max-pr-pages <n> to go further.` }] : []),
         ...(branchScan.baseMissing ? [{ code: 'base-not-found', message: 'Could not resolve origin/HEAD, main, or master for ahead-of-base comparisons.' }] : []),
       ],
     },
@@ -1378,10 +1399,12 @@ class HttpAzureDevOpsTransport {
     });
   }
 
-  async listCompletedPullRequests(_context, { repository, targetRefName = null, minTime = null, queryTimeRangeType = null } = {}) {
+  async listCompletedPullRequests(_context, { repository, targetRefName = null, minTime = null, queryTimeRangeType = null, maxPages = PAGE_LIMIT } = {}) {
     if (!repository) return [];
     const pulls = [];
-    for (let skip = 0; skip < PAGE_LIMIT * PR_PAGE_SIZE; skip += PR_PAGE_SIZE) {
+    const pageBudget = Math.max(1, Math.min(PAGE_LIMIT, Math.floor(maxPages) || PAGE_LIMIT));
+    let truncated = true;
+    for (let skip = 0; skip < pageBudget * PR_PAGE_SIZE; skip += PR_PAGE_SIZE) {
       const params = new URLSearchParams({
         'searchCriteria.status': 'completed',
         '$top': String(PR_PAGE_SIZE),
@@ -1394,7 +1417,7 @@ class HttpAzureDevOpsTransport {
       const data = await this.request(`/_apis/git/repositories/${encodeURIComponent(repository)}/pullrequests?${params.toString()}`);
       const page = data?.value || [];
       pulls.push(...page);
-      if (page.length < PR_PAGE_SIZE) break;
+      if (page.length < PR_PAGE_SIZE) { truncated = false; break; }
     }
     const enriched = [];
     for (const pr of pulls) {
@@ -1409,6 +1432,7 @@ class HttpAzureDevOpsTransport {
       }
       enriched.push({ ...pr, workItemRefs });
     }
+    if (truncated) enriched.truncated = true;
     return enriched;
   }
 
@@ -1452,6 +1476,9 @@ module.exports = {
   STATE_FILE_VERSION,
   DEFAULT_STALE_DAYS,
   DEFAULT_THROTTLE_HOURS,
+  DEFAULT_FIRST_RUN_DAYS,
+  DEFAULT_MAX_PR_PAGES,
+  reconcileQueryMinTime,
   CATEGORY_TO_BUCKET,
   BUCKET_ORDER,
   defaultProjectStatePath,

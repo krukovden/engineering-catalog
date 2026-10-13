@@ -1151,6 +1151,7 @@ test('reconcile filters completed PRs to the repo base branch and only asks for 
     targetRefName: 'refs/heads/main',
     minTime: '2026-10-12T09:30:00.000Z',
     queryTimeRangeType: 'closed',
+    maxPages: 2,
   });
 });
 
@@ -1744,4 +1745,77 @@ test('L-l parseAzureReposRemote accepts explicit ssh ports and project-less lega
   assert.deepEqual(parseAzureReposRemote('https://hal.visualstudio.com/DefaultCollection/_git/Repo'), {
     organization: 'https://hal.visualstudio.com', organizationId: 'hal', project: 'Repo', repository: 'Repo',
   });
+});
+
+test('N10 the first reconcile has a bounded floor and a page budget; the CLI can widen both', async () => {
+  const { reconcileQueryMinTime, DEFAULT_FIRST_RUN_DAYS, DEFAULT_MAX_PR_PAGES } = require('../skills/shared/ado-board/scripts/lib');
+  const now = new Date('2026-10-12T12:00:00.000Z');
+  assert.equal(reconcileQueryMinTime(null, { now }), '2026-09-28T12:00:00.000Z');
+  assert.equal(reconcileQueryMinTime({}, { now, firstRunDays: 30 }), '2026-09-12T12:00:00.000Z');
+  assert.equal(reconcileQueryMinTime({ reconcile: { lastCompletedPrClosedDate: '2026-10-01T00:00:00.000Z' } }, { now }), '2026-10-01T00:00:00.000Z');
+
+  const { repo } = createRepo();
+  git(repo, 'fetch', 'origin');
+  const transport = new FakeTransport({ items: { 5: prItem(5) }, prs: [closedPr(10, 5)] });
+  await reconcileBoard(reconcileArgs(repo, transport));
+  assert.ok(transport.prQueries[0].minTime, 'first run must send a minTime');
+  const ageDays = (Date.now() - new Date(transport.prQueries[0].minTime).getTime()) / 86400000;
+  assert.ok(Math.abs(ageDays - DEFAULT_FIRST_RUN_DAYS) < 0.01);
+  assert.equal(transport.prQueries[0].maxPages, DEFAULT_MAX_PR_PAGES);
+});
+
+test('N10/L-n the HTTP transport honours maxPages and flags truncation', async () => {
+  const { HttpAzureDevOpsTransport } = require('../skills/shared/ado-board/scripts/lib');
+  let listCalls = 0;
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    if (parsed.pathname.endsWith('/pullrequests')) listCalls += 1;
+    const skip = Number(parsed.searchParams.get('$skip') || 0);
+    const value = parsed.pathname.endsWith('/pullrequests')
+      ? Array.from({ length: 100 }, (_, i) => ({ pullRequestId: skip + i, workItemRefs: [] }))
+      : [];
+    return { ok: true, status: 200, text: async () => JSON.stringify({ value }) };
+  };
+  const transport = new HttpAzureDevOpsTransport({
+    context: { organization: 'https://dev.azure.com/example', project: 'Catalog' },
+    authHeader: 'Basic x',
+    fetchImpl,
+  });
+  const prs = await transport.listCompletedPullRequests({}, { repository: 'repo', maxPages: 2 });
+  assert.equal(listCalls, 2);
+  assert.equal(prs.length, 200);
+  assert.equal(prs.truncated, true);
+});
+
+test('L-n a truncated PR list is reported as a pr-list-truncated warning', async () => {
+  const { repo } = createRepo();
+  git(repo, 'fetch', 'origin');
+  const transport = new FakeTransport({ items: { 5: prItem(5) }, prs: [closedPr(10, 5)] });
+  const listed = transport.listCompletedPullRequests.bind(transport);
+  transport.listCompletedPullRequests = async (...args) => Object.assign(await listed(...args), { truncated: true });
+  const result = await reconcileBoard(reconcileArgs(repo, transport));
+  assert.deepEqual(result.report.warnings.map((w) => w.code), ['pr-list-truncated']);
+  const clean = await reconcileBoard(reconcileArgs(repo, new FakeTransport({ items: { 5: prItem(5) }, prs: [closedPr(10, 5)] })));
+  assert.deepEqual(clean.report.warnings.filter((w) => w.code === 'pr-list-truncated'), []);
+});
+
+test('L-m a PR returned on two pages is handled once and strands no retry entry', async () => {
+  const { repo } = createRepo();
+  git(repo, 'fetch', 'origin');
+  const initialState = { version: 1, organization: 'https://dev.azure.com/example', project: 'Catalog', stateMap: createStateMap() };
+  const stateFile = createStateFile(repo, initialState);
+  const transport = new FakeTransport({ items: { 5: prItem(5) }, prs: [closedPr(10, 5), closedPr(10, 5)] });
+  // first lookup fails transiently, later ones succeed
+  const getWorkItem = transport.getWorkItem.bind(transport);
+  let calls = 0;
+  transport.getWorkItem = async (...args) => {
+    calls += 1;
+    if (calls === 1) throw httpError(503, 'blip');
+    return getWorkItem(...args);
+  };
+  const result = await reconcileBoard(reconcileArgs(repo, transport, { stateFile, projectState: initialState }));
+  assert.equal(result.skipped.filter((s) => s.reason === 'move-error').length, 1);
+  const saved = loadProjectState(stateFile);
+  assert.deepEqual(saved.reconcile.retryablePullRequests.map((e) => e.pullRequestId), ['10']);
+  assert.equal(saved.reconcile.processedPullRequests.length, 0);
 });

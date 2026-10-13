@@ -47,6 +47,11 @@ node "<SKILL_DIR>/scripts/ado-board.js" <command> [flags]
   the discovered mapping.
 - `reconcile --stale-days <n>` — how long a `doing` or `verify` item may sit without a
   pushed commit before it is reported. Default: `7`.
+- `reconcile --first-run-days <n>` — with no reconcile watermark yet, only PRs closed within
+  the last `n` days are examined. Default: `14`.
+- `reconcile --max-pr-pages <n>` — PR list pages (100 PRs each) examined per run. Default: `2`,
+  which keeps the session-start hook inside its 30 s budget; raise it for an on-demand
+  catch-up. Hitting the budget is reported as the `pr-list-truncated` warning.
 - `reconcile --allow-unconfigured` — return a skipped result instead of failing when the
   project has no discovered state map yet. The session-start hook uses this.
 - `reconcile --throttle-hours <n>` — do nothing when the same repository was already
