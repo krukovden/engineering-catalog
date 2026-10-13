@@ -1524,6 +1524,185 @@ test('reconcile retries a PR when getWorkItem fails with 500 in the completed-pr
   assert.deepEqual(second.changed.map((entry) => entry.id), ['303']);
 });
 
+test('reconcile keeps the prior completed-PR watermark when the PR list is truncated', async () => {
+  const { repo } = createRepo();
+  git(repo, 'fetch', 'origin');
+  const initialState = {
+    version: 1,
+    organization: 'https://dev.azure.com/example',
+    project: 'Catalog',
+    stateMap: createStateMap(),
+    reconcile: {
+      lastCompletedPrClosedDate: '2026-10-01T00:00:00.000Z',
+      processedPullRequests: [{
+        key: 'engineering-catalog::1::refs/heads/main::2026-10-01T00:00:00.000Z',
+        pullRequestId: '1',
+        repository: 'engineering-catalog',
+        targetRefName: 'refs/heads/main',
+        sourceRefName: 'refs/heads/feature/ADO-1-older',
+        closedDate: '2026-10-01T00:00:00.000Z',
+        workItemIds: ['1'],
+      }],
+    },
+  };
+  const stateFile = createStateFile(repo, initialState);
+  class TruncatedTransport extends FakeTransport {
+    async listCompletedPullRequests(_context, options = {}) {
+      const rows = await super.listCompletedPullRequests(_context, options);
+      rows.truncated = true;
+      return rows;
+    }
+  }
+
+  const transport = new TruncatedTransport({
+    items: {
+      303: {
+        id: 303,
+        rev: 5,
+        fields: {
+          'System.WorkItemType': 'Bug',
+          'System.State': 'Active',
+          'System.Tags': '',
+          'System.Title': 'Truncated PR scan item',
+        },
+      },
+    },
+    prs: [{
+      pullRequestId: 55,
+      sourceRefName: 'refs/heads/bug/ADO-303-newer-window',
+      targetRefName: 'refs/heads/main',
+      creationDate: '2026-10-12T09:00:00.000Z',
+      closedDate: '2026-10-12T13:00:00.000Z',
+      workItemRefs: [{ id: 303 }],
+    }],
+  });
+
+  await reconcileBoard({
+    transport,
+    context: {},
+    stateMap: initialState.stateMap,
+    cwd: repo,
+    staleDays: 30,
+    throttleHours: 0,
+    stateFile,
+    projectState: initialState,
+  });
+
+  const saved = loadProjectState(stateFile);
+  assert.equal(saved.reconcile.lastCompletedPrClosedDate, '2026-10-01T00:00:00.000Z');
+  assert.equal(saved.reconcile.processedPullRequests.length, 2);
+});
+
+test('reconcile does not mark a PR processed when fetching its work-item links fails', async () => {
+  const { repo } = createRepo();
+  git(repo, 'fetch', 'origin');
+  const initialState = {
+    version: 1,
+    organization: 'https://dev.azure.com/example',
+    project: 'Catalog',
+    stateMap: createStateMap(),
+  };
+  const stateFile = createStateFile(repo, initialState);
+
+  class LinkFetchFailureTransport extends FakeTransport {
+    async listCompletedPullRequests(_context, options = {}) {
+      const rows = await super.listCompletedPullRequests(_context, options);
+      return rows.map((pr) => ({ ...pr, workItemRefs: [], workItemRefsError: true }));
+    }
+  }
+
+  const transport = new LinkFetchFailureTransport({
+    items: {
+      303: {
+        id: 303,
+        rev: 5,
+        fields: {
+          'System.WorkItemType': 'Bug',
+          'System.State': 'Active',
+          'System.Tags': '',
+          'System.Title': 'Link fetch failure item',
+        },
+      },
+    },
+    prs: [{
+      pullRequestId: 55,
+      sourceRefName: 'refs/heads/bug/ADO-303-link-fetch',
+      targetRefName: 'refs/heads/main',
+      creationDate: '2026-10-12T09:00:00.000Z',
+      closedDate: '2026-10-12T13:00:00.000Z',
+    }],
+  });
+
+  await reconcileBoard({
+    transport,
+    context: {},
+    stateMap: initialState.stateMap,
+    cwd: repo,
+    staleDays: 30,
+    throttleHours: 0,
+    stateFile,
+    projectState: initialState,
+  });
+
+  const saved = loadProjectState(stateFile);
+  assert.equal(saved.reconcile.processedPullRequests.length, 0);
+  assert.equal(saved.reconcile.retryablePullRequests[0].pullRequestId, '55');
+});
+
+test('listTrackedItemsInBuckets splits large item lists into 200-id batches', async () => {
+  const batches = [];
+  const transport = new (require('../skills/shared/ado-board/scripts/lib').HttpAzureDevOpsTransport)({
+    context: { organization: 'https://dev.azure.com/example', project: 'Catalog' },
+    authHeader: 'Basic test',
+    fetchImpl: async (url, options) => {
+      if (String(url).includes('/_apis/wit/wiql')) {
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            workItems: Array.from({ length: 201 }, (_, index) => ({ id: index + 1 })),
+          }),
+        };
+      }
+      if (String(url).includes('/_apis/wit/workitemsbatch')) {
+        const body = JSON.parse(options.body);
+        batches.push(body.ids);
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            value: body.ids.map((id) => ({
+              id,
+              fields: {
+                'System.WorkItemType': 'Task',
+                'System.State': 'Active',
+                'System.Tags': '',
+                'System.Title': `Item ${id}`,
+              },
+            })),
+          }),
+        };
+      }
+      throw new Error(`unexpected url ${url}`);
+    },
+  });
+
+  const stateMap = {
+    Task: {
+      doing: 'Active',
+      verify: 'Resolved',
+      done: 'Closed',
+      categories: {
+        InProgress: ['Active'],
+        Resolved: ['Resolved'],
+        Completed: ['Closed'],
+      },
+    },
+  };
+
+  const result = await transport.listTrackedItemsInBuckets({}, stateMap, ['doing', 'verify']);
+  assert.equal(result.length, 201);
+  assert.deepEqual(batches.map((batch) => batch.length), [200, 1]);
+});
+
 test('reconcile does not rewrite the state file when no reconcile markers change', async () => {
   const { repo } = createRepo();
   git(repo, 'fetch', 'origin');

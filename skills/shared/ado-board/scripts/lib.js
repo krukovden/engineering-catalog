@@ -804,13 +804,15 @@ function contiguousSuccessClosedDate(processedPullRequests, retryablePullRequest
   return eligible[0] ? eligible[0].toISOString() : null;
 }
 
-function buildNextReconcileState(projectState, processedPullRequests, retryablePullRequests) {
+function buildNextReconcileState(projectState, processedPullRequests, retryablePullRequests, { truncated = false } = {}) {
   const current = projectState?.reconcile || {};
   const nextProcessed = nextReconcileState(projectState, processedPullRequests).processedPullRequests;
   const nextRetryable = updateRetryablePullRequests(current.retryablePullRequests || [], retryablePullRequests, nextProcessed);
   const contiguousClosedDate = contiguousSuccessClosedDate(nextProcessed, nextRetryable);
   return {
-    lastCompletedPrClosedDate: contiguousClosedDate || current.lastCompletedPrClosedDate || null,
+    lastCompletedPrClosedDate: truncated
+      ? current.lastCompletedPrClosedDate || null
+      : contiguousClosedDate || current.lastCompletedPrClosedDate || null,
     processedPullRequests: nextProcessed,
     ...(nextRetryable.length ? { retryablePullRequests: nextRetryable } : {}),
   };
@@ -1053,7 +1055,6 @@ async function reconcileBoard({
   for (const pr of prs) {
     const prKey = completedPullRequestKey(repository, pr);
     if (processedPullRequestKeys.has(prKey)) continue;
-    const ids = parsePullRequestWorkItem(pr);
     const prRef = {
       id: String(pr.pullRequestId || pr.id || ''),
       key: prKey,
@@ -1061,6 +1062,20 @@ async function reconcileBoard({
       sourceRefName: pr.sourceRefName || null,
       targetRefName: pr.targetRefName || null,
     };
+    if (pr.workItemRefsError) {
+      prRef.retryable = true;
+      retryablePullRequests.push({
+        key: prKey,
+        pullRequestId: prRef.id,
+        repository,
+        targetRefName: pr.targetRefName || null,
+        sourceRefName: pr.sourceRefName || null,
+        closedDate: pr.closedDate || null,
+        workItemIds: parsePullRequestWorkItem(pr),
+      });
+      continue;
+    }
+    const ids = parsePullRequestWorkItem(pr);
     for (const id of ids) {
       let item;
       try {
@@ -1156,7 +1171,9 @@ async function reconcileBoard({
   }
 
   if (stateFile && projectState) {
-    const nextReconcile = buildNextReconcileState(projectState, processedPullRequests, retryablePullRequests);
+    const nextReconcile = buildNextReconcileState(projectState, processedPullRequests, retryablePullRequests, {
+      truncated: Boolean(prListTruncated),
+    });
     if (reconcileStateChanged(projectState, nextReconcile)) {
       saveProjectState(stateFile, {
         ...projectState,
@@ -1318,6 +1335,7 @@ function getAzToken() {
 const PAGE_LIMIT = 50;
 const PR_PAGE_SIZE = 100;
 const UPDATES_PAGE_SIZE = 200;
+const WORKITEMS_BATCH_LIMIT = 200;
 
 class HttpError extends Error {
   constructor(status, message, data) {
@@ -1422,15 +1440,17 @@ class HttpAzureDevOpsTransport {
     const enriched = [];
     for (const pr of pulls) {
       let workItemRefs = pr.workItemRefs;
+      let workItemRefsError = false;
       if (!Array.isArray(workItemRefs)) {
         try {
           const workItems = await this.request(`/_apis/git/repositories/${encodeURIComponent(repository)}/pullRequests/${pr.pullRequestId}/workitems?api-version=7.1`);
           workItemRefs = workItems.value || [];
-        } catch {
+        } catch (error) {
           workItemRefs = [];
+          workItemRefsError = true;
         }
       }
-      enriched.push({ ...pr, workItemRefs });
+      enriched.push({ ...pr, workItemRefs, ...(workItemRefsError ? { workItemRefsError: true } : {}) });
     }
     if (truncated) enriched.truncated = true;
     return enriched;
@@ -1453,15 +1473,20 @@ class HttpAzureDevOpsTransport {
     });
     const ids = (query.workItems || []).map((item) => item.id);
     if (!ids.length) return [];
-    const batch = await this.request('/_apis/wit/workitemsbatch?api-version=7.1', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ids,
-        fields: ['System.WorkItemType', 'System.State', 'System.Tags', 'System.Title'],
-      }),
-    });
-    return batch.value || [];
+    const items = [];
+    for (let offset = 0; offset < ids.length; offset += WORKITEMS_BATCH_LIMIT) {
+      const batch = ids.slice(offset, offset + WORKITEMS_BATCH_LIMIT);
+      const page = await this.request('/_apis/wit/workitemsbatch?api-version=7.1', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ids: batch,
+          fields: ['System.WorkItemType', 'System.State', 'System.Tags', 'System.Title'],
+        }),
+      });
+      items.push(...(page.value || []));
+    }
+    return items;
   }
 }
 
