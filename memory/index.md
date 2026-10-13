@@ -2,7 +2,7 @@
      Machine-read fields: `reconciled-sha:` and `store:` lines. Keep it small; unit files win on conflict. -->
 # engineering-catalog — memory index
 
-reconciled-sha: 1fb451476fa11277fd91394b14c7c5d6b9e5fd4c
+reconciled-sha: 8a54e5d82ac5b85966a9e18843c63008b07dc9b6
 store: committed
 
 ## What this project is
@@ -29,6 +29,7 @@ ships as self-contained Node scripts inside the memory skills. No runtime depend
 | [[target-adapters]] | Claude and Copilot layouts, pure outputs, per-platform model hints |
 | [[project-memory]] | memory, memory-init, memory-writer |
 | [[azure-devops-access]] | ado-credentials preflight, qa-ado-work-item |
+| [[board-tracking]] | deterministic Azure Boards state discovery, forward-only moves, and reconcile with repo-derived ADO context, own-marker history guards, and retryable PR state |
 | [[eval-harness]] | eval cases and scaffolds, tiers, hook sources and contracts and what each host consumes, per-arm isolation, the two-worktree compare |
 
 ## Rejected at project level

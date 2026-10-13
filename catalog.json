@@ -1,9 +1,21 @@
 {
   "name": "engineering-catalog",
   "description": "AI engineering catalog — skills, agents, workflows and bundles for GitHub Copilot and Claude Code",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "source": "https://github.com/krukovden/engineering-catalog",
   "skills": [
+    {
+      "name": "ado-board",
+      "description": "Keep Azure Boards in sync with repo facts — discover each work item type's states, move one item forward with an evidence comment, and reconcile pushed branches and completed PRs back onto the board. Use when board tracking must be deterministic or when the platform needs board movement without reimplementing it.",
+      "folder": "shared",
+      "invocation": "model",
+      "platforms": {},
+      "requires": [
+        "ado-credentials"
+      ],
+      "path": "skills/shared/ado-board",
+      "version": "2cefb33335f2"
+    },
     {
       "name": "ado-credentials",
       "description": "Preflight for Azure DevOps access — answers whether a credential is present, whether it still works against the organization, and exactly what to do if not. Run it first, then continue with the skill that needs Azure DevOps (for example qa-ado-work-item to file a bug); that skill starts only after this one answers ok. On Windows it checks the DPAPI-protected PAT written by its setup script; on macOS/Linux it checks the az CLI login and the azure-devops extension.",
@@ -228,6 +240,7 @@
         "diagnosing-bugs",
         "pr-review",
         "ado-credentials",
+        "ado-board",
         "ado-branch",
         "ado-pull-request",
         "commit",
@@ -264,6 +277,8 @@
         "grilling",
         "writing-great-skills",
         "unslop",
+        "ado-credentials",
+        "ado-board",
         "catalog-freshness",
         "memory",
         "memory-init"

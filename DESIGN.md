@@ -648,9 +648,10 @@ costs everything.
 
 ## 14. What is deliberately not here
 
-- **A work tracker.** Memory lives in the repository. Nothing in this design
-  requires a board, and nothing should acquire that requirement without a new
-  decision.
+- **A general work tracker.** Memory lives in the repository, and nothing in
+  this design requires a board for its core model. The one explicit exception is
+  a deliberate board-tracking unit (`ado-board`) that writes Azure Boards
+  **states** from repository facts; anything broader still needs a new decision.
 - **A database, a service, a daemon, an index to rebuild.** Markdown under git is
   the store. Anything derived must be rebuildable from it and must never be the
   thing that is trusted.
