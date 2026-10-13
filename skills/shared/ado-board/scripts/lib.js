@@ -248,7 +248,7 @@ function parseAzureReposRemote(remoteUrl) {
   const text = String(remoteUrl || '').trim();
   if (!text) return null;
 
-  let match = /^https:\/\/dev\.azure\.com\/([^/]+)\/([^/]+)\/_git\/([^/?#]+)(?:[/?#]|$)/i.exec(text);
+  let match = /^https:\/\/(?:[^@/]+@)?dev\.azure\.com\/([^/]+)\/([^/]+)\/_git\/([^/?#]+)(?:[/?#]|$)/i.exec(text);
   if (match) {
     const organizationId = decodeURIComponent(match[1]);
     return {
@@ -446,6 +446,7 @@ async function moveWorkItem({
   id,
   targetBucket,
   comment,
+  allowIdp = false,
   cwd = process.cwd(),
   workItem = null,
 }) {
@@ -458,7 +459,7 @@ async function moveWorkItem({
   const typeMap = stateMap[typeName];
   if (!typeMap) throw new Error(`No discovered state map for "${typeName}". Run "states discover" first.`);
   const from = inferBucketForState(typeMap, currentState);
-  if (hasIdpTag(item)) {
+  if (hasIdpTag(item) && !allowIdp) {
     return {
       ok: false,
       id: String(id),
@@ -524,6 +525,30 @@ async function moveWorkItem({
     }
     throw error;
   }
+}
+
+function parseIsoDate(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function itemStateChangedAt(item) {
+  const fields = item?.fields || {};
+  return parseIsoDate(fields['Microsoft.VSTS.Common.StateChangeDate'])
+    || parseIsoDate(fields['System.ChangedDate']);
+}
+
+function shouldSkipBranchReplay(item, branch) {
+  const changedAt = itemStateChangedAt(item);
+  const committedAt = parseIsoDate(branch?.committedAt);
+  return Boolean(changedAt && committedAt && changedAt > committedAt);
+}
+
+function shouldSkipCompletedPrReplay(item, pr) {
+  const changedAt = itemStateChangedAt(item);
+  const closedAt = parseIsoDate(pr?.closedDate);
+  return Boolean(changedAt && closedAt && changedAt > closedAt);
 }
 
 function parseMarkdownLinks(markdown) {
@@ -607,6 +632,10 @@ function skippableReconcileError(error) {
   return null;
 }
 
+function isRetryablePrSkip(reason) {
+  return reason === 'move-error' || reason === 'required-field';
+}
+
 function completedPullRequestKey(repository, pr) {
   return [
     repository || '',
@@ -624,14 +653,14 @@ function latestClosedDate(prs) {
   return valid[0] ? valid[0].toISOString() : null;
 }
 
-function nextReconcileState(projectState, processedPullRequests, runAt) {
+function nextReconcileState(projectState, processedPullRequests) {
   const current = projectState?.reconcile || {};
   const merged = [...(current.processedPullRequests || []), ...processedPullRequests];
   const deduped = [];
   const seen = new Set();
   for (const entry of merged.slice().sort((a, b) => {
-    const left = new Date(b.closedDate || b.recordedAt || 0).getTime();
-    const right = new Date(a.closedDate || a.recordedAt || 0).getTime();
+    const left = new Date(b.closedDate || 0).getTime();
+    const right = new Date(a.closedDate || 0).getTime();
     return left - right;
   })) {
     if (!entry?.key || seen.has(entry.key)) continue;
@@ -641,11 +670,21 @@ function nextReconcileState(projectState, processedPullRequests, runAt) {
   }
   const lastCompletedPrClosedDate = latestClosedDate(deduped) || current.lastCompletedPrClosedDate || null;
   return {
-    ...current,
-    lastRunAt: runAt.toISOString(),
+    ...(current.lastCompletedPrClosedDate ? { lastCompletedPrClosedDate: current.lastCompletedPrClosedDate } : {}),
     lastCompletedPrClosedDate,
     processedPullRequests: deduped,
   };
+}
+
+function reconcileStateChanged(projectState, nextReconcile) {
+  const current = projectState?.reconcile || {};
+  return JSON.stringify({
+    lastCompletedPrClosedDate: current.lastCompletedPrClosedDate || null,
+    processedPullRequests: current.processedPullRequests || [],
+  }) !== JSON.stringify({
+    lastCompletedPrClosedDate: nextReconcile.lastCompletedPrClosedDate || null,
+    processedPullRequests: nextReconcile.processedPullRequests || [],
+  });
 }
 
 function compareAdoContexts(left, right) {
@@ -724,7 +763,7 @@ async function reconcileBoard({
     } catch (error) {
       const skippedError = skippableReconcileError(error) || { code: 'move-error', message: String(error.message || error) };
       pushSkipped({ id, reason: skippedError.code, source, message: skippedError.message, pullRequest, branch });
-      return;
+      return { disposition: skippedError.code === 'work-item-missing' ? 'terminal-skip' : 'retryable-skip', reason: skippedError.code };
     }
 
     if (hasIdpTag(item)) {
@@ -736,7 +775,7 @@ async function reconcileBoard({
         pullRequest,
         branch,
       });
-      return;
+      return { disposition: 'terminal-skip', reason: 'idp-tagged' };
     }
 
     try {
@@ -763,7 +802,7 @@ async function reconcileBoard({
           ...(pullRequest ? { pullRequest } : {}),
           ...(branch ? { branch } : {}),
         });
-        return;
+        return { disposition: 'moved', reason: null };
       }
       pushSkipped({
         id,
@@ -773,9 +812,15 @@ async function reconcileBoard({
         pullRequest,
         branch,
       });
+      if (result.ok && result.noop) return { disposition: 'noop', reason: result.reason || 'noop' };
+      return {
+        disposition: isRetryablePrSkip(result.error) ? 'retryable-skip' : 'terminal-skip',
+        reason: result.error || result.reason || 'noop',
+      };
     } catch (error) {
       const skippedError = skippableReconcileError(error) || { code: 'move-error', message: String(error.message || error) };
       pushSkipped({ id, reason: skippedError.code, source, message: skippedError.message, pullRequest, branch });
+      return { disposition: skippedError.code === 'move-error' ? 'retryable-skip' : 'terminal-skip', reason: skippedError.code };
     }
   }
 
@@ -785,13 +830,23 @@ async function reconcileBoard({
     try {
       item = await getWorkItemCached(id);
     } catch (error) {
-      const skippedError = skippableReconcileError(error) || { code: 'work-item-missing', message: String(error.message || error) };
+      const skippedError = skippableReconcileError(error) || { code: 'move-error', message: String(error.message || error) };
       pushSkipped({ id, reason: skippedError.code, source: 'branch-pushed', message: skippedError.message, branch: branch.name });
       continue;
     }
     const typeMap = stateMap[item.fields['System.WorkItemType']];
     const bucket = inferBucketForState(typeMap, item.fields['System.State']);
     if (bucket === 'todo') {
+      if (shouldSkipBranchReplay(item, branch)) {
+        pushSkipped({
+          id,
+          reason: 'branch-replayed-after-manual-change',
+          source: 'branch-pushed',
+          message: 'Work item changed after the branch commit; not replaying branch evidence.',
+          branch: branch.name,
+        });
+        continue;
+      }
       const comment = `ado-board: moved to doing after pushed work on ${branch.parsed.branch} (${branch.sha.slice(0, 7)}).`;
       await applyMove({
         id,
@@ -808,6 +863,7 @@ async function reconcileBoard({
     repository,
     targetRefName: branchScan.baseRef ? `refs/heads/${branchScan.baseRef.replace(/^origin\//, '')}` : null,
     minTime: projectState?.reconcile?.lastCompletedPrClosedDate || null,
+    queryTimeRangeType: 'closed',
   };
   const prs = await transport.listCompletedPullRequests(context, prQuery);
   for (const pr of prs) {
@@ -832,8 +888,18 @@ async function reconcileBoard({
       }
       const typeMap = stateMap[item.fields['System.WorkItemType']];
       const targetBucket = item.fields['System.WorkItemType'] === 'Bug' ? 'verify' : 'done';
+      if (shouldSkipCompletedPrReplay(item, pr)) {
+        pushSkipped({
+          id,
+          reason: 'pr-replayed-after-manual-change',
+          source: 'completed-pr',
+          message: 'Work item changed after the PR closed; not replaying completed PR evidence.',
+          pullRequest: prRef,
+        });
+        continue;
+      }
       const comment = completedPrComment(pr, repository, resolveTargetBucket(typeMap, targetBucket));
-      await applyMove({
+      const outcome = await applyMove({
         id,
         targetBucket,
         comment,
@@ -841,18 +907,20 @@ async function reconcileBoard({
         source: 'completed-pr',
         pullRequest: prRef,
       });
+      prRef.retryable = prRef.retryable || outcome?.disposition === 'retryable-skip';
     }
-    processedPullRequestKeys.add(prKey);
-    processedPullRequests.push({
-      key: prKey,
-      pullRequestId: prRef.id,
-      repository,
-      targetRefName: pr.targetRefName || null,
-      sourceRefName: pr.sourceRefName || null,
-      closedDate: pr.closedDate || null,
-      recordedAt: new Date().toISOString(),
-      workItemIds: ids,
-    });
+    if (!prRef.retryable) {
+      processedPullRequestKeys.add(prKey);
+      processedPullRequests.push({
+        key: prKey,
+        pullRequestId: prRef.id,
+        repository,
+        targetRefName: pr.targetRefName || null,
+        sourceRefName: pr.sourceRefName || null,
+        closedDate: pr.closedDate || null,
+        workItemIds: ids,
+      });
+    }
   }
 
   const activeItems = await transport.listTrackedItemsInBuckets(context, stateMap, ['doing', 'verify']);
@@ -882,14 +950,16 @@ async function reconcileBoard({
     if (!latest || (ageDays != null && ageDays >= staleDays)) staleDoing.push(reportEntry);
   }
 
-  const runAt = new Date();
   if (stateFile && projectState) {
-    saveProjectState(stateFile, {
-      ...projectState,
-      reconcile: nextReconcileState(projectState, processedPullRequests, runAt),
-    });
+    const nextReconcile = nextReconcileState(projectState, processedPullRequests);
+    if (reconcileStateChanged(projectState, nextReconcile)) {
+      saveProjectState(stateFile, {
+        ...projectState,
+        reconcile: nextReconcile,
+      });
+    }
   }
-  if (throttleHours > 0) markReconcileThrottle({ root, env, at: runAt });
+  if (throttleHours > 0) markReconcileThrottle({ root, env });
 
   return {
     ok: true,
@@ -1093,7 +1163,7 @@ class HttpAzureDevOpsTransport {
   }
 
   async getWorkItem(_context, id) {
-    return this.request(`/_apis/wit/workitems/${id}?fields=System.WorkItemType,System.State,System.Tags,System.Title&api-version=7.1`);
+    return this.request(`/_apis/wit/workitems/${id}?fields=System.WorkItemType,System.State,System.Tags,System.Title,System.ChangedDate,Microsoft.VSTS.Common.StateChangeDate&api-version=7.1`);
   }
 
   async moveWorkItemState(_context, { id, rev, state, comment }) {
@@ -1108,7 +1178,7 @@ class HttpAzureDevOpsTransport {
     });
   }
 
-  async listCompletedPullRequests(_context, { repository, targetRefName = null, minTime = null } = {}) {
+  async listCompletedPullRequests(_context, { repository, targetRefName = null, minTime = null, queryTimeRangeType = null } = {}) {
     if (!repository) return [];
     const params = new URLSearchParams({
       'searchCriteria.status': 'completed',
@@ -1117,6 +1187,7 @@ class HttpAzureDevOpsTransport {
     });
     if (targetRefName) params.set('searchCriteria.targetRefName', targetRefName);
     if (minTime) params.set('searchCriteria.minTime', minTime);
+    if (queryTimeRangeType) params.set('searchCriteria.queryTimeRangeType', queryTimeRangeType);
     const data = await this.request(`/_apis/git/repositories/${encodeURIComponent(repository)}/pullrequests?${params.toString()}`);
     const pulls = data.value || [];
     const enriched = [];
@@ -1204,4 +1275,7 @@ module.exports = {
   readReconcileThrottle,
   markReconcileThrottle,
   resolveTargetBucket,
+  parseAzureReposRemote,
+  shouldSkipBranchReplay,
+  shouldSkipCompletedPrReplay,
 };

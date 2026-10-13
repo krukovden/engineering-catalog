@@ -50,3 +50,24 @@ on Azure Repos remotes, reconcile derives organization/project from `origin` and
 run when the discovered state file or configured credentials point somewhere else. That made
 the hook less ambient — it can now fail fast instead of guessing — but it prevents a repo in
 one org from writing tracker state into another org that happens to be configured in `az`.
+
+### e-20261012-6a4e Reconcile correctness now comes from server timestamps, not shared state-file markers
+- status: active
+- evidence: confirmed
+- pr: none
+- sha-at-write: d47db43ecaa5a2525070898bd9e24e2f18930c3c
+- merged-sha: none
+- supersedes: none
+- superseded-by: none
+- date: 2026-10-12
+
+`ado-board` still keeps discovered state names and a bounded set of processed PR markers in
+`.engineering-catalog/ado-board.json`, but replay safety no longer depends on sharing that
+file. A fresh clone now checks the work item's server-side `StateChangeDate` against the PR
+close time or branch commit time before it replays any evidence, so a human reopen or a
+manual move back to todo wins even when the local marker cache is empty.
+
+That changed the purpose of the state file from "shared source of truth for replay safety"
+to "local cache that avoids rescanning work this machine already handled". The trade-off is
+intentional: the file can stay local and stop dirtying worktrees on no-op hook runs, while
+correctness still comes from Azure DevOps history and the repository's own timestamps.

@@ -20,7 +20,7 @@ function usage() {
   return [
     'usage:',
     '  node ado-board.js states discover [--state-file FILE] [--choose "Type:bucket=State"]... [--non-interactive] [--json]',
-    '  node ado-board.js move <id> <todo|doing|verify|done> [--comment TEXT] [--state-file FILE] [--json]',
+    '  node ado-board.js move <id> <todo|doing|verify|done> [--comment TEXT] [--allow-idp] [--state-file FILE] [--json]',
     '  node ado-board.js reconcile [--state-file FILE] [--stale-days N] [--throttle-hours N] [--allow-unconfigured] [--json]',
   ].join('\n');
 }
@@ -33,6 +33,7 @@ function parse(argv) {
     if (arg === '--json') options.json = true;
     else if (arg === '--non-interactive') options.nonInteractive = true;
     else if (arg === '--allow-unconfigured') options.allowUnconfigured = true;
+    else if (arg === '--allow-idp') options.allowIdp = true;
     else if (arg === '--comment') options.comment = argv[++i];
     else if (arg.startsWith('--comment=')) options.comment = arg.slice('--comment='.length);
     else if (arg === '--state-file') options.stateFile = argv[++i];
@@ -101,6 +102,7 @@ async function main() {
       id,
       targetBucket,
       comment: options.comment || manualEvidenceComment(process.cwd(), targetBucket),
+      allowIdp: options.allowIdp === true,
       cwd: process.cwd(),
     });
     if (!result.ok) {

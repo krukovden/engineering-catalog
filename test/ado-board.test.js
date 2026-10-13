@@ -12,6 +12,7 @@ const {
   chooseState,
   discoverStates,
   moveWorkItem,
+  parseAzureReposRemote,
   reconcileBoard,
   parseBranchWorkItem,
   parsePullRequestWorkItem,
@@ -100,9 +101,10 @@ class FakeTransport {
   async listCompletedPullRequests(_context, options = {}) {
     if (this.listPrError) throw this.listPrError;
     this.prQueries.push(structuredClone(options));
+    const timeField = options.queryTimeRangeType === 'closed' ? 'closedDate' : 'creationDate';
     return this.prs
       .filter((pr) => !options.targetRefName || pr.targetRefName === options.targetRefName)
-      .filter((pr) => !options.minTime || !pr.closedDate || new Date(pr.closedDate) >= new Date(options.minTime))
+      .filter((pr) => !options.minTime || !pr[timeField] || new Date(pr[timeField]) >= new Date(options.minTime))
       .map((pr) => structuredClone(pr));
   }
 
@@ -210,6 +212,39 @@ test('parseBranchWorkItem recognises feature, bug and pbi branches', () => {
   assert.equal(parseBranchWorkItem('chore/no-ticket'), null);
 });
 
+test('parseAzureReposRemote recognises Azure HTTPS, userinfo, visualstudio, and ssh remotes', () => {
+  assert.deepEqual(parseAzureReposRemote('https://dev.azure.com/hanwha/Catalog/_git/engineering-catalog'), {
+    organization: 'https://dev.azure.com/hanwha',
+    organizationId: 'hanwha',
+    project: 'Catalog',
+    repository: 'engineering-catalog',
+  });
+  assert.deepEqual(parseAzureReposRemote('https://HAL-TSS@dev.azure.com/HAL-TSS/TSS-Orion/_git/Repo'), {
+    organization: 'https://dev.azure.com/HAL-TSS',
+    organizationId: 'HAL-TSS',
+    project: 'TSS-Orion',
+    repository: 'Repo',
+  });
+  assert.deepEqual(parseAzureReposRemote('https://hal.visualstudio.com/Catalog/_git/engineering-catalog'), {
+    organization: 'https://hal.visualstudio.com',
+    organizationId: 'hal',
+    project: 'Catalog',
+    repository: 'engineering-catalog',
+  });
+  assert.deepEqual(parseAzureReposRemote('git@ssh.dev.azure.com:v3/HAL-TSS/TSS-Orion/Repo'), {
+    organization: 'https://dev.azure.com/HAL-TSS',
+    organizationId: 'HAL-TSS',
+    project: 'TSS-Orion',
+    repository: 'Repo',
+  });
+  assert.deepEqual(parseAzureReposRemote('ssh://git@ssh.dev.azure.com/v3/HAL-TSS/TSS-Orion/Repo'), {
+    organization: 'https://dev.azure.com/HAL-TSS',
+    organizationId: 'HAL-TSS',
+    project: 'TSS-Orion',
+    repository: 'Repo',
+  });
+});
+
 test('parsePullRequestWorkItem ignores stray #n references and keeps explicit work item refs', () => {
   assert.deepEqual(parsePullRequestWorkItem({
     title: 'feat(42): add board repair',
@@ -292,7 +327,7 @@ test('requiredFieldName matches real TF401320 required fields and ignores invali
   );
 });
 
-test('move refuses backwards movement, reports required fields, and rejects idp-tagged items', async () => {
+test('move refuses backwards movement, reports required fields, and only allows idp-tagged items with explicit opt-in', async () => {
   const stateMap = createStateMap();
 
   await assert.rejects(() => moveWorkItem({
@@ -368,11 +403,36 @@ test('move refuses backwards movement, reports required fields, and rejects idp-
   });
   assert.equal(idp.ok, false);
   assert.equal(idp.error, 'idp-tagged');
+
+  const allowed = await moveWorkItem({
+    transport: new FakeTransport({
+      items: {
+        14: {
+          id: 14,
+          rev: 1,
+          fields: {
+            'System.WorkItemType': 'Product Backlog Item',
+            'System.State': 'New',
+            'System.Tags': 'idp:claimed',
+            'System.Title': 'Runner card',
+          },
+        },
+      },
+    }),
+    context: {},
+    stateMap,
+    id: 14,
+    targetBucket: 'doing',
+    allowIdp: true,
+    comment: 'runner move',
+  });
+  assert.equal(allowed.ok, true);
+  assert.equal(allowed.to, 'doing');
 });
 
-test('resolveAdoContext derives Azure context from origin and refuses mismatches', () => {
+test('resolveAdoContext derives Azure context from origin and refuses config or state mismatches', () => {
   const { repo } = createRepo();
-  git(repo, 'remote', 'set-url', 'origin', 'https://dev.azure.com/hanwha/Catalog/_git/engineering-catalog');
+  git(repo, 'remote', 'set-url', 'origin', 'https://hanwha@dev.azure.com/hanwha/Catalog/_git/engineering-catalog');
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ado-home-'));
 
   writeAdoConfig(home, 'https://dev.azure.com/hanwha', 'Catalog');
@@ -390,6 +450,12 @@ test('resolveAdoContext derives Azure context from origin and refuses mismatches
     env: { ...process.env, ENGCAT_HOME: home },
     cwd: repo,
   }), /repository origin/);
+  writeAdoConfig(home, 'https://dev.azure.com/hanwha', 'Catalog');
+  assert.throws(() => resolveAdoContext({
+    env: { ...process.env, ENGCAT_HOME: home },
+    cwd: repo,
+    state: { organization: 'https://dev.azure.com/hal-tss', project: 'Catalog' },
+  }), /state file/);
 });
 
 test('reconcile --allow-unconfigured exits before any auth or git context work', () => {
@@ -594,6 +660,86 @@ test('reconcile records per-item skips, keeps earlier moves, maps alternate stat
   ]);
 });
 
+test('reconcile does not replay a completed PR onto an item changed after the PR closed', async () => {
+  const { repo } = createRepo();
+  git(repo, 'fetch', 'origin');
+
+  const transport = new FakeTransport({
+    items: {
+      303: {
+        id: 303,
+        rev: 6,
+        fields: {
+          'System.WorkItemType': 'Product Backlog Item',
+          'System.State': 'Committed',
+          'System.Tags': '',
+          'System.Title': 'Human reopened item',
+          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-12T14:00:00.000Z',
+          'System.ChangedDate': '2026-10-12T14:00:00.000Z',
+        },
+      },
+    },
+    prs: [{
+      pullRequestId: 55,
+      sourceRefName: 'refs/heads/feature/ADO-303-human-reopen',
+      targetRefName: 'refs/heads/main',
+      creationDate: '2026-10-10T09:00:00.000Z',
+      closedDate: '2026-10-12T13:00:00.000Z',
+      workItemRefs: [{ id: 303 }],
+    }],
+  });
+
+  const result = await reconcileBoard({
+    transport,
+    context: {},
+    stateMap: createStateMap(),
+    cwd: repo,
+    staleDays: 30,
+    throttleHours: 0,
+  });
+
+  assert.deepEqual(result.changed, []);
+  assert.equal(result.skipped[0].reason, 'pr-replayed-after-manual-change');
+  assert.equal(transport.items.get('303').fields['System.State'], 'Committed');
+});
+
+test('reconcile does not replay a branch onto an item moved back to todo after the branch commit', async () => {
+  const { repo } = createRepo();
+  createPushedBranch(repo, 'feature/ADO-101-catalog-sync', 'feature.txt', 'feature work');
+  git(repo, 'fetch', 'origin');
+  const branchCommittedAt = git(repo, 'for-each-ref', '--format=%(committerdate:iso-strict)', 'refs/remotes/origin/feature/ADO-101-catalog-sync');
+
+  const transport = new FakeTransport({
+    items: {
+      101: {
+        id: 101,
+        rev: 2,
+        fields: {
+          'System.WorkItemType': 'Product Backlog Item',
+          'System.State': 'New',
+          'System.Tags': '',
+          'System.Title': 'Human moved it back to todo',
+          'Microsoft.VSTS.Common.StateChangeDate': new Date(new Date(branchCommittedAt).getTime() + 60000).toISOString(),
+          'System.ChangedDate': new Date(new Date(branchCommittedAt).getTime() + 60000).toISOString(),
+        },
+      },
+    },
+  });
+
+  const result = await reconcileBoard({
+    transport,
+    context: {},
+    stateMap: createStateMap(),
+    cwd: repo,
+    staleDays: 30,
+    throttleHours: 0,
+  });
+
+  assert.deepEqual(result.changed, []);
+  assert.equal(result.skipped[0].reason, 'branch-replayed-after-manual-change');
+  assert.equal(transport.items.get('101').fields['System.State'], 'New');
+});
+
 test('reconcile records processed pull requests and does not reapply them after a reopen', async () => {
   const { repo } = createRepo();
   git(repo, 'fetch', 'origin');
@@ -672,6 +818,8 @@ test('reconcile filters completed PRs to the repo base branch and only asks for 
           'System.State': 'Committed',
           'System.Tags': '',
           'System.Title': 'Should stay doing',
+          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-01T00:00:00.000Z',
+          'System.ChangedDate': '2026-10-01T00:00:00.000Z',
         },
       },
     },
@@ -680,6 +828,7 @@ test('reconcile filters completed PRs to the repo base branch and only asks for 
         pullRequestId: 1,
         sourceRefName: 'refs/heads/feature/ADO-101-catalog-sync',
         targetRefName: 'refs/heads/release/1.0',
+        creationDate: '2026-10-12T08:00:00.000Z',
         closedDate: '2026-10-12T10:00:00.000Z',
         workItemRefs: [{ id: 101 }],
       },
@@ -687,13 +836,22 @@ test('reconcile filters completed PRs to the repo base branch and only asks for 
         pullRequestId: 2,
         sourceRefName: 'refs/heads/feature/ADO-101-catalog-sync',
         targetRefName: 'refs/heads/main',
+        creationDate: '2026-10-01T08:00:00.000Z',
         closedDate: '2026-10-12T09:00:00.000Z',
+        workItemRefs: [{ id: 101 }],
+      },
+      {
+        pullRequestId: 3,
+        sourceRefName: 'refs/heads/feature/ADO-101-catalog-sync',
+        targetRefName: 'refs/heads/main',
+        creationDate: '2026-10-01T08:00:00.000Z',
+        closedDate: '2026-10-12T10:00:00.000Z',
         workItemRefs: [{ id: 101 }],
       },
     ],
   });
 
-  await reconcileBoard({
+  const result = await reconcileBoard({
     transport,
     context: {},
     stateMap: createStateMap(),
@@ -706,10 +864,12 @@ test('reconcile filters completed PRs to the repo base branch and only asks for 
     },
   });
 
+  assert.deepEqual(result.changed.map((entry) => entry.id), ['101']);
   assert.deepEqual(transport.prQueries[0], {
     repository: 'engineering-catalog',
     targetRefName: 'refs/heads/main',
     minTime: '2026-10-12T09:30:00.000Z',
+    queryTimeRangeType: 'closed',
   });
 });
 
@@ -798,4 +958,132 @@ test('reconcile writes the throttle stamp only after a successful run', async ()
     env,
   });
   assert.equal(second.throttled, true);
+});
+
+test('reconcile retries a completed PR after a transient move error instead of marking it processed', async () => {
+  const { repo } = createRepo();
+  git(repo, 'fetch', 'origin');
+  const initialState = {
+    version: 1,
+    organization: 'https://dev.azure.com/example',
+    project: 'Catalog',
+    stateMap: createStateMap(),
+  };
+  const stateFile = createStateFile(repo, initialState);
+  const before = fs.readFileSync(stateFile, 'utf8');
+  const retryable = httpError(500, 'server exploded');
+
+  const firstTransport = new FakeTransport({
+    items: {
+      303: {
+        id: 303,
+        rev: 5,
+        fields: {
+          'System.WorkItemType': 'Product Backlog Item',
+          'System.State': 'Committed',
+          'System.Tags': '',
+          'System.Title': 'Retryable item',
+          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-01T00:00:00.000Z',
+          'System.ChangedDate': '2026-10-01T00:00:00.000Z',
+        },
+      },
+    },
+    failMoveById: { 303: retryable },
+    prs: [{
+      pullRequestId: 55,
+      sourceRefName: 'refs/heads/feature/ADO-303-retryable',
+      targetRefName: 'refs/heads/main',
+      creationDate: '2026-10-10T09:00:00.000Z',
+      closedDate: '2026-10-12T13:00:00.000Z',
+      workItemRefs: [{ id: 303 }],
+    }],
+  });
+
+  const first = await reconcileBoard({
+    transport: firstTransport,
+    context: {},
+    stateMap: initialState.stateMap,
+    cwd: repo,
+    staleDays: 30,
+    throttleHours: 0,
+    stateFile,
+    projectState: initialState,
+  });
+  assert.equal(first.skipped[0].reason, 'move-error');
+  assert.equal(fs.readFileSync(stateFile, 'utf8'), before);
+
+  const secondTransport = new FakeTransport({
+    items: {
+      303: {
+        id: 303,
+        rev: 5,
+        fields: {
+          'System.WorkItemType': 'Product Backlog Item',
+          'System.State': 'Committed',
+          'System.Tags': '',
+          'System.Title': 'Retryable item',
+          'Microsoft.VSTS.Common.StateChangeDate': '2026-10-01T00:00:00.000Z',
+          'System.ChangedDate': '2026-10-01T00:00:00.000Z',
+        },
+      },
+    },
+    prs: [{
+      pullRequestId: 55,
+      sourceRefName: 'refs/heads/feature/ADO-303-retryable',
+      targetRefName: 'refs/heads/main',
+      creationDate: '2026-10-10T09:00:00.000Z',
+      closedDate: '2026-10-12T13:00:00.000Z',
+      workItemRefs: [{ id: 303 }],
+    }],
+  });
+
+  const second = await reconcileBoard({
+    transport: secondTransport,
+    context: {},
+    stateMap: initialState.stateMap,
+    cwd: repo,
+    staleDays: 30,
+    throttleHours: 0,
+    stateFile,
+    projectState: initialState,
+  });
+  assert.deepEqual(second.changed.map((entry) => entry.id), ['303']);
+});
+
+test('reconcile does not rewrite the state file when no reconcile markers change', async () => {
+  const { repo } = createRepo();
+  git(repo, 'fetch', 'origin');
+  const initialState = {
+    version: 1,
+    organization: 'https://dev.azure.com/example',
+    project: 'Catalog',
+    stateMap: createStateMap(),
+    reconcile: {
+      lastCompletedPrClosedDate: '2026-10-12T13:00:00.000Z',
+      processedPullRequests: [{
+        key: 'engineering-catalog::55::refs/heads/main::2026-10-12T13:00:00.000Z',
+        pullRequestId: '55',
+        repository: 'engineering-catalog',
+        targetRefName: 'refs/heads/main',
+        sourceRefName: 'refs/heads/feature/ADO-303-retryable',
+        closedDate: '2026-10-12T13:00:00.000Z',
+        workItemIds: ['303'],
+      }],
+    },
+  };
+  const stateFile = createStateFile(repo, initialState);
+  const before = fs.readFileSync(stateFile, 'utf8');
+
+  await reconcileBoard({
+    transport: new FakeTransport(),
+    context: {},
+    stateMap: initialState.stateMap,
+    cwd: repo,
+    staleDays: 30,
+    throttleHours: 0,
+    stateFile,
+    projectState: initialState,
+  });
+
+  assert.equal(fs.readFileSync(stateFile, 'utf8'), before);
 });
