@@ -26,3 +26,27 @@ project-local `.engineering-catalog/ado-board.json` map with no credential mater
 Azure access still comes through [[azure-devops-access]]. `reconcile` stays inside the
 existing freshness hook as one throttled best-effort line so both Claude and Copilot keep a
 single `SessionStart` context hook and the board repair path stays out of git hooks.
+
+### e-20261012-f3c1 Reconcile now records processed PRs and trusts the repo remote over az defaults
+- status: active
+- evidence: confirmed
+- pr: none
+- sha-at-write: e5484cf4b9f6685db2c52205b8ac07b297322a98
+- merged-sha: none
+- supersedes: none
+- superseded-by: none
+- date: 2026-10-12
+
+`ado-board` no longer treats reconcile as purely stateless. Completed pull requests that
+reconcile has already handled are now recorded in the project-local
+`.engineering-catalog/ado-board.json` file, bounded to a small recent set, so a later
+session does not replay the same PR onto a work item that a person deliberately reopened.
+That trade-off chose a little local state over the previous "scan the last completed PRs
+every run" design because replaying old PRs was both wrong and able to wedge the whole run
+behind one bad item.
+
+The same file now carries the repo's effective Azure context as a consistency check:
+on Azure Repos remotes, reconcile derives organization/project from `origin` and refuses to
+run when the discovered state file or configured credentials point somewhere else. That made
+the hook less ambient — it can now fail fast instead of guessing — but it prevents a repo in
+one org from writing tracker state into another org that happens to be configured in `az`.

@@ -14,3 +14,4 @@ try {
 } catch {
     # Hook helpers never block the session.
 }
+exit 0

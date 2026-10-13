@@ -9,9 +9,11 @@ const {
   discoverStates,
   moveWorkItem,
   reconcileBoard,
+  readReconcileThrottle,
   resolveAdoContext,
   createTransport,
   manualEvidenceComment,
+  repoRoot,
 } = require('./lib');
 
 function usage() {
@@ -65,10 +67,10 @@ async function main() {
 
   const stateFile = options.stateFile || defaultProjectStatePath(process.cwd());
   const [command, subcommand, ...rest] = positionals;
-  const context = resolveAdoContext({ contextName: options.contextName });
-  const transport = createTransport({ context });
 
   if (command === 'states' && subcommand === 'discover') {
+    const context = resolveAdoContext({ contextName: options.contextName, cwd: process.cwd() });
+    const transport = createTransport({ context });
     const result = await discoverStates({
       transport,
       context,
@@ -86,6 +88,12 @@ async function main() {
     if (!id || !targetBucket) throw new Error(usage());
     const state = loadProjectState(stateFile);
     if (!state?.stateMap) throw new Error(`No ado-board state map at ${stateFile}. Run "states discover" first.`);
+    const context = resolveAdoContext({
+      contextName: options.contextName,
+      cwd: process.cwd(),
+      state,
+    });
+    const transport = createTransport({ context });
     const result = await moveWorkItem({
       transport,
       context,
@@ -112,13 +120,29 @@ async function main() {
       }
       throw new Error(`No ado-board state map at ${stateFile}. Run "states discover" first.`);
     }
+    const root = repoRoot(process.cwd());
+    if (!root) throw new Error('reconcile needs a git repository.');
+    const throttleHours = Number.isFinite(options.throttleHours) ? options.throttleHours : DEFAULT_THROTTLE_HOURS;
+    const throttle = readReconcileThrottle({ root, hours: throttleHours });
+    if (throttle.throttled) {
+      print({ ok: true, command: 'reconcile', throttled: true, lastRunAt: throttle.lastRunAt }, options.json);
+      return;
+    }
+    const context = resolveAdoContext({
+      contextName: options.contextName,
+      cwd: process.cwd(),
+      state,
+    });
+    const transport = createTransport({ context });
     const result = await reconcileBoard({
       transport,
       context,
       stateMap: state.stateMap,
       cwd: process.cwd(),
       staleDays: Number.isFinite(options.staleDays) ? options.staleDays : DEFAULT_STALE_DAYS,
-      throttleHours: Number.isFinite(options.throttleHours) ? options.throttleHours : DEFAULT_THROTTLE_HOURS,
+      throttleHours,
+      stateFile,
+      projectState: state,
     });
     print(result, options.json);
     return;

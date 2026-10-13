@@ -10,6 +10,7 @@ const readline = require('node:readline/promises');
 const STATE_FILE_VERSION = 1;
 const DEFAULT_STALE_DAYS = 7;
 const DEFAULT_THROTTLE_HOURS = 12;
+const RECONCILE_MARKER_LIMIT = 200;
 const CATEGORY_TO_BUCKET = {
   Proposed: 'todo',
   InProgress: 'doing',
@@ -17,6 +18,9 @@ const CATEGORY_TO_BUCKET = {
   Completed: 'done',
   Removed: 'removed',
 };
+const BUCKET_TO_CATEGORY = Object.fromEntries(
+  Object.entries(CATEGORY_TO_BUCKET).map(([category, bucket]) => [bucket, category]),
+);
 const BUCKET_ORDER = ['todo', 'doing', 'verify', 'done'];
 const ACCESS_TOKEN_RESOURCE = '499b84ac-1321-427f-aa17-267ca6975798';
 
@@ -39,6 +43,10 @@ function writeJsonFile(file, value) {
 
 function normalizeOrganization(value) {
   return String(value || '').trim().replace(/\/+$/, '');
+}
+
+function normalizeName(value) {
+  return String(value || '').trim();
 }
 
 function git(cwd, args, { allowFailure = false } = {}) {
@@ -115,13 +123,33 @@ function parseChoices(values = []) {
   return out;
 }
 
+function uniqueStrings(values = []) {
+  return [...new Set(values.filter(Boolean).map((value) => String(value)))];
+}
+
+function categoryStatesForBucket(typeMap, bucket) {
+  const category = BUCKET_TO_CATEGORY[bucket];
+  if (!category || !typeMap?.categories?.[category]) return [];
+  return uniqueStrings(typeMap.categories[category]);
+}
+
+function statesForBucket(typeMap, bucket) {
+  const states = categoryStatesForBucket(typeMap, bucket);
+  const primary = typeMap?.[bucket];
+  if (primary && !states.includes(primary)) states.unshift(primary);
+  return states;
+}
+
+function resolveTargetBucket(typeMap, targetBucket) {
+  if (targetBucket === 'verify' && !typeMap?.verify && typeMap?.done) return 'done';
+  return targetBucket;
+}
+
 function inferBucketForState(typeMap, stateName) {
   if (!typeMap) return null;
-  for (const [bucket, mappedState] of Object.entries(typeMap)) {
-    if (bucket === 'removed' || bucket === 'choices' || bucket === 'categories') continue;
-    if (mappedState === stateName) return bucket;
+  for (const bucket of [...BUCKET_ORDER, 'removed']) {
+    if (statesForBucket(typeMap, bucket).includes(stateName)) return bucket;
   }
-  if (typeMap.removed === stateName) return 'removed';
   return null;
 }
 
@@ -141,37 +169,66 @@ function parseBranchWorkItem(name) {
 
 function parsePullRequestWorkItem(pr) {
   const linked = (pr.workItemRefs || []).map((ref) => String(ref.id)).filter(Boolean);
-  if (linked.length) return linked;
+  if (linked.length) return uniqueStrings(linked);
+
   const byBranch = parseBranchWorkItem(pr.sourceRefName || pr.sourceRef || pr.branch || '');
   if (byBranch) return [byBranch.id];
+
   const matches = new Set();
-  for (const text of [pr.title, pr.description]) {
-    const source = String(text || '');
+  const title = String(pr.title || '');
+  const description = String(pr.description || '');
+
+  for (const pattern of [/\b(?:feat|fix|bug)\((\d+)\)/gi]) {
     let match;
-    const pattern = /\b(?:feat|fix|bug)\((\d+)\)|#(\d+)\b/g;
-    while ((match = pattern.exec(source)) !== null) {
-      matches.add(match[1] || match[2]);
+    while ((match = pattern.exec(title)) !== null) matches.add(match[1]);
+  }
+
+  for (const text of [title, description]) {
+    for (const pattern of [/\bAB#(\d+)\b/gi, /\b(?:fix(?:es|ed)?|close(?:s|d)?|resolve(?:s|d)?)\s+#(\d+)\b/gi]) {
+      let match;
+      while ((match = pattern.exec(text)) !== null) matches.add(match[1]);
     }
   }
+
   return [...matches];
 }
 
+function resolveBaseRef(root) {
+  const originHead = git(root, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD'], { allowFailure: true });
+  if (originHead) {
+    const short = originHead.replace(/^refs\/remotes\//, '');
+    if (gitRefExists(root, originHead) || gitRefExists(root, short)) return short;
+  }
+  for (const candidate of ['origin/main', 'origin/master', 'main', 'master']) {
+    const fullRef = candidate.startsWith('origin/') ? `refs/remotes/${candidate}` : `refs/heads/${candidate}`;
+    if (gitRefExists(root, fullRef) || gitRefExists(root, candidate)) return candidate;
+  }
+  return null;
+}
+
 function listRemoteBranches(root) {
-  const baseRef = gitRefExists(root, 'refs/remotes/origin/main')
-    ? 'origin/main'
-    : gitRefExists(root, 'refs/heads/main') ? 'main' : null;
-  const output = git(root, ['for-each-ref', '--format=%(refname:short)\t%(objectname)\t%(committerdate:iso-strict)', 'refs/remotes/origin'], { allowFailure: true });
-  if (!output) return [];
-  return output
+  const baseRef = resolveBaseRef(root);
+  const output = git(
+    root,
+    ['for-each-ref', '--format=%(refname:short)\t%(objectname)\t%(committerdate:iso-strict)', 'refs/remotes/origin'],
+    { allowFailure: true },
+  );
+  if (!output) return { baseRef, baseMissing: !baseRef, branches: [] };
+
+  const entries = output
     .split('\n')
     .filter(Boolean)
     .map((line) => {
       const [name, sha, committedAt] = line.split('\t');
       return { name, sha, committedAt };
     })
-    .filter((entry) => entry.name !== 'origin/HEAD' && entry.name !== 'origin/main')
+    .filter((entry) => entry.name !== 'origin/HEAD' && entry.name !== baseRef);
+
+  if (!baseRef) return { baseRef, baseMissing: true, branches: [] };
+
+  const branches = entries
     .map((entry) => {
-      const ahead = baseRef ? Number(git(root, ['rev-list', '--count', `${baseRef}..${entry.name}`], { allowFailure: true }) || '0') : 0;
+      const ahead = Number(git(root, ['rev-list', '--count', `${baseRef}..${entry.name}`], { allowFailure: true }) || '0');
       return {
         ...entry,
         ahead,
@@ -179,13 +236,57 @@ function listRemoteBranches(root) {
       };
     })
     .filter((entry) => entry.ahead > 0);
+
+  return { baseRef, baseMissing: false, branches };
 }
 
 function remoteOrigin(root) {
   return git(root, ['remote', 'get-url', 'origin'], { allowFailure: true });
 }
 
+function parseAzureReposRemote(remoteUrl) {
+  const text = String(remoteUrl || '').trim();
+  if (!text) return null;
+
+  let match = /^https:\/\/dev\.azure\.com\/([^/]+)\/([^/]+)\/_git\/([^/?#]+)(?:[/?#]|$)/i.exec(text);
+  if (match) {
+    const organizationId = decodeURIComponent(match[1]);
+    return {
+      organization: normalizeOrganization(`https://dev.azure.com/${organizationId}`),
+      organizationId,
+      project: decodeURIComponent(match[2]),
+      repository: decodeURIComponent(match[3]),
+    };
+  }
+
+  match = /^https:\/\/([^./]+)\.visualstudio\.com\/([^/]+)\/_git\/([^/?#]+)(?:[/?#]|$)/i.exec(text);
+  if (match) {
+    const organizationId = decodeURIComponent(match[1]);
+    return {
+      organization: normalizeOrganization(`https://${organizationId}.visualstudio.com`),
+      organizationId,
+      project: decodeURIComponent(match[2]),
+      repository: decodeURIComponent(match[3]),
+    };
+  }
+
+  match = /^(?:ssh:\/\/)?git@ssh\.dev\.azure\.com[:/]v3\/([^/]+)\/([^/]+)\/([^/?#]+)(?:[/?#]|$)/i.exec(text);
+  if (match) {
+    const organizationId = decodeURIComponent(match[1]);
+    return {
+      organization: normalizeOrganization(`https://dev.azure.com/${organizationId}`),
+      organizationId,
+      project: decodeURIComponent(match[2]),
+      repository: decodeURIComponent(match[3]),
+    };
+  }
+
+  return null;
+}
+
 function parseRepositoryName(remoteUrl) {
+  const remote = parseAzureReposRemote(remoteUrl);
+  if (remote) return remote.repository;
   const text = String(remoteUrl || '');
   let match = /\/_git\/([^/?#]+)(?:[/?#]|$)/.exec(text);
   if (match) return decodeURIComponent(match[1]);
@@ -209,19 +310,29 @@ function daysBetween(now, iso) {
 
 function requiredFieldName(error) {
   const message = String(error?.message || error || '');
-  const patterns = [
-    /Field '([^']+)'/i,
-    /field "([^"]+)"/i,
-    /required field ([A-Za-z0-9_.-]+)/i,
-  ];
-  for (const pattern of patterns) {
-    const match = pattern.exec(message);
-    if (match) return match[1];
+  let match = /Rule Error for field ([^.]+)\.\s*Error code:\s*([^.]+)/i.exec(message);
+  if (match && /\b(?:Required|InvalidEmpty)\b/i.test(match[2])) {
+    return match[1].trim();
   }
+  match = /Field '([^']+)'\s+must be set\./i.exec(message);
+  if (match) return match[1];
+  match = /field "([^"]+)"\s+must be set\./i.exec(message);
+  if (match) return match[1];
+  match = /required field ([A-Za-z0-9_.-]+)/i.exec(message);
+  if (match) return match[1];
   return null;
 }
 
-async function chooseState({ typeName, bucket, category, states, nonInteractive, chooseMap, input = process.stdin, output = process.stdout }) {
+async function chooseState({
+  typeName,
+  bucket,
+  category,
+  states,
+  nonInteractive,
+  chooseMap,
+  input = process.stdin,
+  output = process.stderr,
+}) {
   const key = `${typeName}::${bucket}`;
   if (chooseMap[key]) return { state: chooseMap[key], via: 'flag' };
   if (states.length === 1) return { state: states[0], via: 'single' };
@@ -256,7 +367,7 @@ async function discoverStates({
   choose = [],
   nonInteractive = false,
   input = process.stdin,
-  output = process.stdout,
+  output = process.stderr,
 }) {
   const chooseMap = parseChoices(choose);
   const types = await transport.listWorkItemTypes(context);
@@ -304,6 +415,7 @@ async function discoverStates({
     updatedAt: new Date().toISOString(),
     stateMap,
     ...('path' in current ? { path: current.path } : {}),
+    ...('reconcile' in current ? { reconcile: current.reconcile } : {}),
   };
   saveProjectState(stateFile, next);
   return { ok: true, command: 'states-discover', stateFile, resolved, stateMap };
@@ -320,6 +432,13 @@ function manualEvidenceComment(cwd, targetBucket) {
   return `${parts.join(' ')}.`;
 }
 
+function completedPrComment(pr, repository, targetBucket) {
+  const prId = pr.pullRequestId || pr.id || 'unknown';
+  const source = pr.sourceRefName || 'unknown source branch';
+  const marker = repository ? ` [ado-board reconcile ${repository}#${prId}]` : ` [ado-board reconcile #${prId}]`;
+  return `ado-board: moved to ${targetBucket} after completed PR #${prId} from ${source}.${marker}`;
+}
+
 async function moveWorkItem({
   transport,
   context,
@@ -331,36 +450,50 @@ async function moveWorkItem({
   workItem = null,
 }) {
   if (!BUCKET_ORDER.includes(targetBucket) && targetBucket !== 'verify') {
-    throw new Error(`Unknown bucket "${targetBucket}". Use todo, doing, verify or done.`);
+    throw new Error('Unknown bucket "' + targetBucket + '". Use todo, doing, verify or done.');
   }
   const item = workItem || await transport.getWorkItem(context, id);
+  const typeName = item.fields['System.WorkItemType'];
+  const currentState = item.fields['System.State'];
+  const typeMap = stateMap[typeName];
+  if (!typeMap) throw new Error(`No discovered state map for "${typeName}". Run "states discover" first.`);
+  const from = inferBucketForState(typeMap, currentState);
   if (hasIdpTag(item)) {
+    return {
+      ok: false,
+      id: String(id),
+      error: 'idp-tagged',
+      message: 'ado-board move refuses idp-tagged items; reconcile skips them instead.',
+      from,
+      to: targetBucket,
+    };
+  }
+  if (targetBucket === 'removed') throw new Error('ado-board never moves an item into Removed.');
+  if (!from) throw new Error(`State "${currentState}" for "${typeName}" is not in the discovered map.`);
+  if (from === 'removed') throw new Error('ado-board never touches Removed items.');
+
+  const effectiveBucket = resolveTargetBucket(typeMap, targetBucket);
+  if (bucketRank(effectiveBucket) < bucketRank(from)) {
+    throw new Error(`Refusing to move ${id} backwards (${from} → ${effectiveBucket}).`);
+  }
+  if (from === effectiveBucket) {
     return {
       ok: true,
       noop: true,
       id: String(id),
-      reason: 'idp-tagged',
-      from: inferBucketForState(stateMap[item.fields['System.WorkItemType']], item.fields['System.State']),
-      to: targetBucket,
+      from,
+      to: effectiveBucket,
+      requestedTo: targetBucket,
+      state: currentState,
     };
   }
-  const typeName = item.fields['System.WorkItemType'];
-  const typeMap = stateMap[typeName];
-  if (!typeMap) throw new Error(`No discovered state map for "${typeName}". Run "states discover" first.`);
-  if (targetBucket === 'removed') throw new Error('ado-board never moves an item into Removed.');
-  const currentState = item.fields['System.State'];
-  const from = inferBucketForState(typeMap, currentState);
-  if (!from) throw new Error(`State "${currentState}" for "${typeName}" is not in the discovered map.`);
-  if (from === 'removed') throw new Error('ado-board never touches Removed items.');
-  if (bucketRank(targetBucket) < bucketRank(from)) {
-    throw new Error(`Refusing to move ${id} backwards (${from} → ${targetBucket}).`);
+
+  const targetState = typeMap[effectiveBucket];
+  if (!targetState) {
+    throw new Error(`No "${effectiveBucket}" state is mapped for "${typeName}". Run "states discover" again.`);
   }
-  if (from === targetBucket) {
-    return { ok: true, noop: true, id: String(id), from, to: targetBucket, state: currentState };
-  }
-  const targetState = typeMap[targetBucket];
-  if (!targetState) throw new Error(`No "${targetBucket}" state is mapped for "${typeName}". Run "states discover" again.`);
-  const evidence = comment || manualEvidenceComment(cwd, targetBucket);
+
+  const evidence = comment || manualEvidenceComment(cwd, effectiveBucket);
   try {
     const updated = await transport.moveWorkItemState(context, {
       id: String(id),
@@ -372,7 +505,8 @@ async function moveWorkItem({
       ok: true,
       id: String(id),
       from,
-      to: targetBucket,
+      to: effectiveBucket,
+      requestedTo: targetBucket,
       state: targetState,
       comment: evidence,
       workItem: updated,
@@ -426,26 +560,107 @@ function blueprintDrift(root) {
   return reports;
 }
 
-function reconcileThrottle({ root, hours, env = process.env }) {
+function readReconcileThrottle({ root, hours, env = process.env }) {
   if (!hours || hours <= 0) return { throttled: false };
   const file = hookThrottlePath(env);
   const key = hashText(repoFingerprint(root));
-  const now = Date.now();
   let state = { projects: {} };
   if (fs.existsSync(file)) {
     try { state = parseJsonFile(file); } catch { state = { projects: {} }; }
   }
   const previous = state.projects?.[key];
-  if (previous) {
-    const last = new Date(previous);
-    if (!Number.isNaN(last.getTime()) && (now - last.getTime()) < hours * 3600000) {
-      return { throttled: true, lastRunAt: previous, file };
-    }
+  if (!previous) return { throttled: false, file, key };
+  const last = new Date(previous);
+  if (Number.isNaN(last.getTime())) return { throttled: false, file, key };
+  if ((Date.now() - last.getTime()) < hours * 3600000) {
+    return { throttled: true, lastRunAt: previous, file, key };
+  }
+  return { throttled: false, file, key, lastRunAt: previous };
+}
+
+function markReconcileThrottle({ root, env = process.env, at = new Date() }) {
+  const file = hookThrottlePath(env);
+  const key = hashText(repoFingerprint(root));
+  let state = { projects: {} };
+  if (fs.existsSync(file)) {
+    try { state = parseJsonFile(file); } catch { state = { projects: {} }; }
   }
   state.projects = state.projects || {};
-  state.projects[key] = new Date(now).toISOString();
+  state.projects[key] = at.toISOString();
   writeJsonFile(file, state);
-  return { throttled: false, file, lastRunAt: state.projects[key] };
+  return { file, lastRunAt: state.projects[key] };
+}
+
+function skippableReconcileError(error) {
+  if (error?.status === 404) {
+    return { code: 'work-item-missing', message: String(error.message || error) };
+  }
+  const message = String(error?.message || error || '');
+  if (/unknown work item/i.test(message)) return { code: 'work-item-missing', message };
+  if (/never touches Removed/i.test(message) || /never moves an item into Removed/i.test(message)) {
+    return { code: 'removed', message };
+  }
+  if (/backwards/.test(message)) return { code: 'backwards', message };
+  if (/discovered state map/i.test(message) || /is not in the discovered map/i.test(message) || /No "[^"]+" state is mapped/i.test(message)) {
+    return { code: 'state-unmapped', message };
+  }
+  return null;
+}
+
+function completedPullRequestKey(repository, pr) {
+  return [
+    repository || '',
+    String(pr.pullRequestId || pr.id || ''),
+    normalizeName(pr.targetRefName),
+    normalizeName(pr.closedDate),
+  ].join('::');
+}
+
+function latestClosedDate(prs) {
+  const valid = prs
+    .map((pr) => new Date(pr.closedDate || 0))
+    .filter((date) => !Number.isNaN(date.getTime()))
+    .sort((a, b) => b.getTime() - a.getTime());
+  return valid[0] ? valid[0].toISOString() : null;
+}
+
+function nextReconcileState(projectState, processedPullRequests, runAt) {
+  const current = projectState?.reconcile || {};
+  const merged = [...(current.processedPullRequests || []), ...processedPullRequests];
+  const deduped = [];
+  const seen = new Set();
+  for (const entry of merged.slice().sort((a, b) => {
+    const left = new Date(b.closedDate || b.recordedAt || 0).getTime();
+    const right = new Date(a.closedDate || a.recordedAt || 0).getTime();
+    return left - right;
+  })) {
+    if (!entry?.key || seen.has(entry.key)) continue;
+    seen.add(entry.key);
+    deduped.push(entry);
+    if (deduped.length >= RECONCILE_MARKER_LIMIT) break;
+  }
+  const lastCompletedPrClosedDate = latestClosedDate(deduped) || current.lastCompletedPrClosedDate || null;
+  return {
+    ...current,
+    lastRunAt: runAt.toISOString(),
+    lastCompletedPrClosedDate,
+    processedPullRequests: deduped,
+  };
+}
+
+function compareAdoContexts(left, right) {
+  const leftRemote = parseAzureReposRemote(left?.organization ? `${left.organization}/${left.project}/_git/placeholder` : '');
+  const rightRemote = parseAzureReposRemote(right?.organization ? `${right.organization}/${right.project}/_git/placeholder` : '');
+  const leftOrg = leftRemote?.organizationId?.toLowerCase() || normalizeOrganization(left?.organization).toLowerCase();
+  const rightOrg = rightRemote?.organizationId?.toLowerCase() || normalizeOrganization(right?.organization).toLowerCase();
+  return leftOrg === rightOrg && normalizeName(left?.project).toLowerCase() === normalizeName(right?.project).toLowerCase();
+}
+
+function assertAdoContextMatches(expected, actual, expectedLabel, actualLabel) {
+  if (!expected?.organization || !expected?.project || !actual?.organization || !actual?.project) return;
+  if (!compareAdoContexts(expected, actual)) {
+    throw new Error(`${expectedLabel} ${normalizeOrganization(expected.organization)}/${normalizeName(expected.project)} does not match ${actualLabel} ${normalizeOrganization(actual.organization)}/${normalizeName(actual.project)}.`);
+  }
 }
 
 async function reconcileBoard({
@@ -456,85 +671,225 @@ async function reconcileBoard({
   staleDays = DEFAULT_STALE_DAYS,
   throttleHours = 0,
   env = process.env,
+  stateFile = null,
+  projectState = null,
 }) {
   const root = repoRoot(cwd);
   if (!root) throw new Error('reconcile needs a git repository.');
-  const throttle = reconcileThrottle({ root, hours: throttleHours, env });
+  const throttle = readReconcileThrottle({ root, hours: throttleHours, env });
   if (throttle.throttled) {
     return { ok: true, command: 'reconcile', throttled: true, lastRunAt: throttle.lastRunAt };
   }
 
-  const branches = listRemoteBranches(root);
-  const repository = parseRepositoryName(remoteOrigin(root));
+  const branchScan = listRemoteBranches(root);
+  const origin = remoteOrigin(root);
+  const azureRemote = parseAzureReposRemote(origin);
+  const repository = azureRemote?.repository || parseRepositoryName(origin);
   const workCache = new Map();
   const moves = [];
   const skipped = [];
+  const processedPullRequests = [];
+  const processedPullRequestKeys = new Set(
+    (projectState?.reconcile?.processedPullRequests || []).map((entry) => entry.key),
+  );
+  const latestBranchById = new Map();
+  for (const branch of branchScan.branches.filter((entry) => entry.parsed)) {
+    const current = latestBranchById.get(branch.parsed.id);
+    if (!current || new Date(branch.committedAt) > new Date(current.committedAt)) {
+      latestBranchById.set(branch.parsed.id, branch);
+    }
+  }
 
   async function getWorkItemCached(id) {
     if (!workCache.has(id)) workCache.set(id, await transport.getWorkItem(context, id));
     return workCache.get(id);
   }
 
-  async function applyMove(id, targetBucket, comment, reason) {
-    const item = await getWorkItemCached(id);
-    const result = await moveWorkItem({
-      transport,
-      context,
-      stateMap,
-      id,
-      targetBucket,
-      comment,
-      cwd,
-      workItem: item,
+  function pushSkipped(entry) {
+    skipped.push({
+      id: String(entry.id),
+      reason: entry.reason,
+      source: entry.source,
+      ...(entry.message ? { message: entry.message } : {}),
+      ...(entry.result ? { result: entry.result } : {}),
+      ...(entry.pullRequest ? { pullRequest: entry.pullRequest } : {}),
+      ...(entry.branch ? { branch: entry.branch } : {}),
     });
-    if (result.ok && !result.noop && result.workItem) workCache.set(id, result.workItem);
-    if (result.ok && !result.noop) moves.push({ id: String(id), from: result.from, to: result.to, reason, comment });
-    else skipped.push({ id: String(id), reason, result });
   }
 
-  for (const branch of branches.filter((entry) => entry.parsed)) {
+  async function applyMove({ id, targetBucket, comment, reason, source, pullRequest = null, branch = null }) {
+    let item;
+    try {
+      item = await getWorkItemCached(id);
+    } catch (error) {
+      const skippedError = skippableReconcileError(error) || { code: 'move-error', message: String(error.message || error) };
+      pushSkipped({ id, reason: skippedError.code, source, message: skippedError.message, pullRequest, branch });
+      return;
+    }
+
+    if (hasIdpTag(item)) {
+      pushSkipped({
+        id,
+        reason: 'idp-tagged',
+        source,
+        message: 'ado-board reconcile skips idp-tagged items.',
+        pullRequest,
+        branch,
+      });
+      return;
+    }
+
+    try {
+      const result = await moveWorkItem({
+        transport,
+        context,
+        stateMap,
+        id,
+        targetBucket,
+        comment,
+        cwd,
+        workItem: item,
+      });
+      if (result.ok && !result.noop && result.workItem) {
+        workCache.set(String(id), result.workItem);
+        moves.push({
+          id: String(id),
+          from: result.from,
+          to: result.to,
+          requestedTo: result.requestedTo,
+          reason,
+          comment,
+          source,
+          ...(pullRequest ? { pullRequest } : {}),
+          ...(branch ? { branch } : {}),
+        });
+        return;
+      }
+      pushSkipped({
+        id,
+        reason: result.error || result.reason || 'noop',
+        source,
+        result,
+        pullRequest,
+        branch,
+      });
+    } catch (error) {
+      const skippedError = skippableReconcileError(error) || { code: 'move-error', message: String(error.message || error) };
+      pushSkipped({ id, reason: skippedError.code, source, message: skippedError.message, pullRequest, branch });
+    }
+  }
+
+  for (const branch of latestBranchById.values()) {
     const id = branch.parsed.id;
-    const item = await getWorkItemCached(id);
+    let item;
+    try {
+      item = await getWorkItemCached(id);
+    } catch (error) {
+      const skippedError = skippableReconcileError(error) || { code: 'work-item-missing', message: String(error.message || error) };
+      pushSkipped({ id, reason: skippedError.code, source: 'branch-pushed', message: skippedError.message, branch: branch.name });
+      continue;
+    }
     const typeMap = stateMap[item.fields['System.WorkItemType']];
     const bucket = inferBucketForState(typeMap, item.fields['System.State']);
     if (bucket === 'todo') {
       const comment = `ado-board: moved to doing after pushed work on ${branch.parsed.branch} (${branch.sha.slice(0, 7)}).`;
-      await applyMove(id, 'doing', comment, 'branch-pushed');
+      await applyMove({
+        id,
+        targetBucket: 'doing',
+        comment,
+        reason: 'branch-pushed',
+        source: 'branch-pushed',
+        branch: branch.name,
+      });
     }
   }
 
-  const prs = await transport.listCompletedPullRequests(context, { repository });
+  const prQuery = {
+    repository,
+    targetRefName: branchScan.baseRef ? `refs/heads/${branchScan.baseRef.replace(/^origin\//, '')}` : null,
+    minTime: projectState?.reconcile?.lastCompletedPrClosedDate || null,
+  };
+  const prs = await transport.listCompletedPullRequests(context, prQuery);
   for (const pr of prs) {
-    for (const id of parsePullRequestWorkItem(pr)) {
-      const item = await getWorkItemCached(id);
+    const prKey = completedPullRequestKey(repository, pr);
+    if (processedPullRequestKeys.has(prKey)) continue;
+    const ids = parsePullRequestWorkItem(pr);
+    const prRef = {
+      id: String(pr.pullRequestId || pr.id || ''),
+      key: prKey,
+      closedDate: pr.closedDate || null,
+      sourceRefName: pr.sourceRefName || null,
+      targetRefName: pr.targetRefName || null,
+    };
+    for (const id of ids) {
+      let item;
+      try {
+        item = await getWorkItemCached(id);
+      } catch (error) {
+        const skippedError = skippableReconcileError(error) || { code: 'work-item-missing', message: String(error.message || error) };
+        pushSkipped({ id, reason: skippedError.code, source: 'completed-pr', message: skippedError.message, pullRequest: prRef });
+        continue;
+      }
+      const typeMap = stateMap[item.fields['System.WorkItemType']];
       const targetBucket = item.fields['System.WorkItemType'] === 'Bug' ? 'verify' : 'done';
-      const comment = `ado-board: moved to ${targetBucket} after completed PR #${pr.pullRequestId || pr.id} from ${pr.sourceRefName || 'unknown source branch'}.`;
-      await applyMove(id, targetBucket, comment, 'completed-pr');
+      const comment = completedPrComment(pr, repository, resolveTargetBucket(typeMap, targetBucket));
+      await applyMove({
+        id,
+        targetBucket,
+        comment,
+        reason: 'completed-pr',
+        source: 'completed-pr',
+        pullRequest: prRef,
+      });
     }
+    processedPullRequestKeys.add(prKey);
+    processedPullRequests.push({
+      key: prKey,
+      pullRequestId: prRef.id,
+      repository,
+      targetRefName: pr.targetRefName || null,
+      sourceRefName: pr.sourceRefName || null,
+      closedDate: pr.closedDate || null,
+      recordedAt: new Date().toISOString(),
+      workItemIds: ids,
+    });
   }
 
   const activeItems = await transport.listTrackedItemsInBuckets(context, stateMap, ['doing', 'verify']);
   const now = new Date();
-  const stale = [];
+  const staleDoing = [];
+  const verifyWaitingForQa = [];
   for (const item of activeItems) {
     if (hasIdpTag(item)) continue;
     const typeMap = stateMap[item.fields['System.WorkItemType']];
     const bucket = inferBucketForState(typeMap, item.fields['System.State']);
-    const matchingBranches = branches.filter((branch) => branch.parsed && branch.parsed.id === String(item.id));
+    const matchingBranches = branchScan.branches.filter((branch) => branch.parsed && branch.parsed.id === String(item.id));
     const latest = matchingBranches.sort((a, b) => new Date(b.committedAt) - new Date(a.committedAt))[0];
     const ageDays = latest ? daysBetween(now, latest.committedAt) : null;
-    if (!latest || (ageDays != null && ageDays >= staleDays)) {
-      stale.push({
-        id: String(item.id),
-        type: item.fields['System.WorkItemType'],
-        title: item.fields['System.Title'],
-        bucket,
-        branch: latest ? latest.name : null,
-        lastCommitAt: latest ? latest.committedAt : null,
-        ageDays: ageDays == null ? null : Number(ageDays.toFixed(1)),
-      });
+    const reportEntry = {
+      id: String(item.id),
+      type: item.fields['System.WorkItemType'],
+      title: item.fields['System.Title'],
+      bucket,
+      branch: latest ? latest.name : null,
+      lastCommitAt: latest ? latest.committedAt : null,
+      ageDays: ageDays == null ? null : Number(ageDays.toFixed(1)),
+    };
+    if (bucket === 'verify') {
+      verifyWaitingForQa.push(reportEntry);
+      continue;
     }
+    if (!latest || (ageDays != null && ageDays >= staleDays)) staleDoing.push(reportEntry);
   }
+
+  const runAt = new Date();
+  if (stateFile && projectState) {
+    saveProjectState(stateFile, {
+      ...projectState,
+      reconcile: nextReconcileState(projectState, processedPullRequests, runAt),
+    });
+  }
+  if (throttleHours > 0) markReconcileThrottle({ root, env, at: runAt });
 
   return {
     ok: true,
@@ -543,11 +898,15 @@ async function reconcileBoard({
     changed: moves,
     skipped,
     report: {
-      doingWithNoPushedCommit: stale,
-      untrackedBranches: branches
+      doingWithNoPushedCommit: staleDoing,
+      verifyWaitingForQa,
+      untrackedBranches: branchScan.branches
         .filter((entry) => !entry.parsed)
         .map((entry) => ({ branch: entry.name, sha: entry.sha, committedAt: entry.committedAt })),
       blueprintDrift: blueprintDrift(root),
+      warnings: [
+        ...(branchScan.baseMissing ? [{ code: 'base-not-found', message: 'Could not resolve origin/HEAD, main, or master for ahead-of-base comparisons.' }] : []),
+      ],
     },
   };
 }
@@ -596,27 +955,67 @@ function loadContextFromConfig(config, contextName) {
   };
 }
 
-function resolveAdoContext({ env = process.env, platform = process.platform, contextName } = {}) {
+function resolveAdoContext({
+  env = process.env,
+  platform = process.platform,
+  contextName,
+  cwd = process.cwd(),
+  state = null,
+} = {}) {
+  const root = repoRoot(cwd) || cwd;
+  const remote = parseAzureReposRemote(remoteOrigin(root));
   const configPath = path.join(homeDir(env), '.ado-credentials', 'config.json');
+  let configured = null;
+
   if (fs.existsSync(configPath)) {
-    return loadContextFromConfig(parseJsonFile(configPath), contextName);
-  }
-  if (platform === 'win32') {
+    configured = loadContextFromConfig(parseJsonFile(configPath), contextName);
+  } else if (platform === 'win32') {
     throw new Error('Azure DevOps config not found in ~/.ado-credentials/config.json. Run ado-credentials first.');
+  } else {
+    const raw = execFileSync('az', ['devops', 'configure', '--list', '--output', 'json'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const defaults = parseAzDefaults(raw);
+    if (!defaults.organization || !defaults.project) {
+      throw new Error('Azure DevOps defaults are incomplete. Run ado-credentials first.');
+    }
+    configured = {
+      organization: normalizeOrganization(defaults.organization),
+      project: String(defaults.project).trim(),
+      contextName: null,
+    };
   }
-  const raw = execFileSync('az', ['devops', 'configure', '--list', '--output', 'json'], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const defaults = parseAzDefaults(raw);
-  if (!defaults.organization || !defaults.project) {
-    throw new Error('Azure DevOps defaults are incomplete. Run ado-credentials first.');
+
+  if (remote) {
+    assertAdoContextMatches(configured, remote, 'Configured Azure DevOps context', 'repository origin');
+    if (state?.organization || state?.project) {
+      assertAdoContextMatches(
+        { organization: state.organization, project: state.project },
+        remote,
+        'ado-board state file',
+        'repository origin',
+      );
+    }
+    return {
+      organization: remote.organization,
+      project: remote.project,
+      repository: remote.repository,
+      contextName: configured.contextName,
+      source: 'remote',
+    };
   }
-  return {
-    organization: normalizeOrganization(defaults.organization),
-    project: String(defaults.project).trim(),
-    contextName: null,
-  };
+
+  if (state?.organization || state?.project) {
+    assertAdoContextMatches(
+      configured,
+      { organization: state.organization, project: state.project },
+      'Configured Azure DevOps context',
+      'ado-board state file',
+    );
+  }
+
+  return configured;
 }
 
 function getWindowsPat(env = process.env) {
@@ -709,9 +1108,16 @@ class HttpAzureDevOpsTransport {
     });
   }
 
-  async listCompletedPullRequests(_context, { repository } = {}) {
+  async listCompletedPullRequests(_context, { repository, targetRefName = null, minTime = null } = {}) {
     if (!repository) return [];
-    const data = await this.request(`/_apis/git/repositories/${encodeURIComponent(repository)}/pullrequests?searchCriteria.status=completed&$top=100&api-version=7.1`);
+    const params = new URLSearchParams({
+      'searchCriteria.status': 'completed',
+      '$top': '100',
+      'api-version': '7.1',
+    });
+    if (targetRefName) params.set('searchCriteria.targetRefName', targetRefName);
+    if (minTime) params.set('searchCriteria.minTime', minTime);
+    const data = await this.request(`/_apis/git/repositories/${encodeURIComponent(repository)}/pullrequests?${params.toString()}`);
     const pulls = data.value || [];
     const enriched = [];
     for (const pr of pulls) {
@@ -732,7 +1138,7 @@ class HttpAzureDevOpsTransport {
   async listTrackedItemsInBuckets(_context, stateMap, buckets) {
     const clauses = [];
     for (const [typeName, mapped] of Object.entries(stateMap)) {
-      const states = buckets.map((bucket) => mapped[bucket]).filter(Boolean);
+      const states = uniqueStrings(buckets.flatMap((bucket) => statesForBucket(mapped, bucket)));
       if (!states.length) continue;
       const quotedStates = states.map((state) => `'${String(state).replace(/'/g, "''")}'`).join(', ');
       clauses.push(`([System.WorkItemType] = '${typeName.replace(/'/g, "''")}' AND [System.State] IN (${quotedStates}))`);
@@ -781,9 +1187,11 @@ module.exports = {
   inferBucketForState,
   parseBranchWorkItem,
   parsePullRequestWorkItem,
+  parseAzureReposRemote,
   listRemoteBranches,
   blueprintDrift,
   requiredFieldName,
+  chooseState,
   discoverStates,
   moveWorkItem,
   reconcileBoard,
@@ -793,4 +1201,7 @@ module.exports = {
   repoRoot,
   parseRepositoryName,
   gitRefExists,
+  readReconcileThrottle,
+  markReconcileThrottle,
+  resolveTargetBucket,
 };

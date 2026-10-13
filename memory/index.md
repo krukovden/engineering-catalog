@@ -29,7 +29,7 @@ ships as self-contained Node scripts inside the memory skills. No runtime depend
 | [[target-adapters]] | Claude and Copilot layouts, pure outputs, per-platform model hints |
 | [[project-memory]] | memory, memory-init, memory-writer |
 | [[azure-devops-access]] | ado-credentials preflight, qa-ado-work-item |
-| [[board-tracking]] | deterministic Azure Boards state discovery, forward-only moves and reconcile from git/PR facts |
+| [[board-tracking]] | deterministic Azure Boards state discovery, forward-only moves, and reconcile with processed-PR markers plus repo-derived ADO context |
 | [[eval-harness]] | eval cases and scaffolds, tiers, hook sources and contracts and what each host consumes, per-arm isolation, the two-worktree compare |
 
 ## Rejected at project level
