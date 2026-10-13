@@ -13,6 +13,12 @@
 // the actual authority regardless (checked for drift against both the `if` string and the
 // Copilot twin by coding-agent-parity): the two pattern languages are not identical, and a
 // permission glob quirk should never be the only thing standing between an edit and a denial.
+//
+// Deny = the JSON decision plus exit 2. Claude Code reads stdout JSON on exit 2 as well as on 0:
+// the block holds and permissionDecisionReason, not stderr, is the reason the model sees (hooks
+// reference, "Exit code 2"; live-captured on Claude Code 2.1.296 — copilot-facts.md §4.2). Fails
+// open by itself: only exit 2 blocks on Claude, and a crash (1) or a missing node (127) is a
+// non-blocking error.
 const path = require('path');
 
 const GENERATED = [
@@ -20,7 +26,8 @@ const GENERATED = [
   /^plugin\.json$/,
   /^\.claude-plugin\/(marketplace|plugin)\.json$/,
   /^hooks\/hooks\.json$/,
-  /^\.copilot-plugin\/(agents\/[^/]+\.agent\.md|hooks\.json)$/,
+  /^\.copilot-plugin\/(agents\/[^/]+\.agent\.md|hooks\.json|workflows\/[^/]+\/SKILL\.md)$/,
+  /^\.claude-workflows\/[^/]+\/SKILL\.md$/,
   /^\.github\/plugin\/marketplace\.json$/,
   /^(skills|agents|workflows)\/[^/]+\/README\.md$/,
 ];

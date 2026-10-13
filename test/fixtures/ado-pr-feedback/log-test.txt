@@ -1,0 +1,4 @@
+2026-10-01T10:00:00Z Starting
+[31mFAIL[0m  src/export.test.ts
+  x writes header
+##[error]Bash exited with code 1

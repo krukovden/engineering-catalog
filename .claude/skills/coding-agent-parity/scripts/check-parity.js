@@ -87,8 +87,8 @@ function checkGuardScripts(root, fail) {
   if (!claudeSrc.includes('hookSpecificOutput')) fail('guard-scripts', '.claude/hooks/block-generated.js: no longer wraps output in hookSpecificOutput — that shape is required for Claude to read a PreToolUse decision');
   if (copilotSrc.includes('hookSpecificOutput')) fail('guard-scripts', ".github/hooks/block-generated.js: emits hookSpecificOutput — that's Claude's shape; Copilot's preToolUse deny is flat (copilot-facts.md §4.1)");
 
-  if (!claudeSrc.includes('process.exit(2)')) fail('guard-scripts', '.claude/hooks/block-generated.js: no longer exits 2 on a match — PreToolUse only blocks on exit code 2');
-  if (!copilotSrc.includes('process.exit(2)')) fail('guard-scripts', '.github/hooks/block-generated.js: no longer exits 2 on a match — preToolUse only denies unconditionally on exit code 2 (copilot-facts.md §4.1)');
+  if (!claudeSrc.includes('process.exit(2)')) fail('guard-scripts', '.claude/hooks/block-generated.js: no longer exits 2 on a match — its deny and its Copilot twin\'s fail-open wrapper both rely on exit 2');
+  if (!copilotSrc.includes('process.exit(2)')) fail('guard-scripts', '.github/hooks/block-generated.js: no longer exits 2 on a match — block-generated.json passes only exit 2 through, so any other deny is swallowed');
 }
 
 function checkGuardWiring(root, fail) {
@@ -115,7 +115,15 @@ function checkGuardWiring(root, fail) {
   if (copilotHook.matcher !== COPILOT_MATCHER) {
     fail('guard-wiring', `.github/hooks/block-generated.json: matcher is "${copilotHook.matcher}", expected the runtime-name list "${COPILOT_MATCHER}" (copilot-facts.md §6.1 — "Edit|Write" silently never fires here)`);
   }
-  if (!copilotHook.command || !copilotHook.command.includes('.github/hooks/block-generated.js')) fail('guard-wiring', `.github/hooks/block-generated.json: command does not invoke .github/hooks/block-generated.js (got "${copilotHook.command}")`);
+  // Copilot denies on any non-zero preToolUse exit (copilot-facts.md §4.1), so both shell
+  // commands must pass the script's deliberate exit 2 through and turn anything else into 0 —
+  // otherwise a missing `node` blocks every edit in the repository.
+  for (const shell of ['bash', 'powershell']) {
+    const cmd = copilotHook[shell];
+    if (!cmd || !cmd.includes('.github/hooks/block-generated.js')) fail('guard-wiring', `.github/hooks/block-generated.json: ${shell} does not invoke .github/hooks/block-generated.js (got "${cmd}")`);
+    else if (!/exit 2\b/.test(cmd) || !/exit 0$/.test(cmd)) fail('guard-wiring', `.github/hooks/block-generated.json: ${shell} no longer fails open — it must exit 2 only on the script's deny and 0 otherwise (got "${cmd}")`);
+  }
+  if (copilotHook.command) fail('guard-wiring', '.github/hooks/block-generated.json: has a bare "command" — it does not fail open; use the "bash" and "powershell" wrappers');
 }
 
 function checkHookWiring(root, fail) {

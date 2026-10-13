@@ -11,10 +11,16 @@ const args = process.argv.slice(2);
 const opt = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
 const memory = opt('--memory');
 if (!memory) { console.error('usage: lint.js --memory <dir>'); process.exit(2); }
+const repo = opt('--repo');
+const warnKiB = Number(opt('--instruction-warn-kib') || 24);
+const hardKiB = Number(opt('--instruction-hard-kib') || 32);
+const warnBytes = warnKiB * 1024;
+const hardBytes = hardKiB * 1024;
 
 const indexFile = path.join(memory, 'index.md');
 const unitsDir = path.join(memory, 'units');
 const errors = [];
+const warnings = [];
 
 const indexText = fs.existsSync(indexFile) ? fs.readFileSync(indexFile, 'utf8') : '';
 if (!fs.existsSync(indexFile)) errors.push(`missing ${indexFile}`);
@@ -40,6 +46,33 @@ const indexSlugs = new Set(index.units.map((u) => u.slug));
 for (const u of index.units) if (!unitSlugs.has(u.slug)) errors.push(`index.md references [[${u.slug}]] but units/${u.slug}.md does not exist`);
 for (const slug of unitSlugs) if (!indexSlugs.has(slug)) errors.push(`units/${slug}.md exists but has no row in index.md`);
 
+function projectRoot() {
+  if (repo) return repo;
+  try {
+    const storeFile = path.join(memory, '.store.json');
+    if (fs.existsSync(storeFile)) {
+      const store = JSON.parse(fs.readFileSync(storeFile, 'utf8'));
+      if (store && store.store === 'committed') return path.dirname(memory);
+    }
+  } catch { /* advisory only */ }
+  return null;
+}
+
+const root = projectRoot();
+if (root) {
+  for (const rel of ['CLAUDE.md', 'AGENTS.md']) {
+    const file = path.join(root, rel);
+    if (!fs.existsSync(file)) continue;
+    const size = fs.statSync(file).size;
+    if (size > hardBytes) {
+      warnings.push(`${rel} is ${size} bytes; the advisory line is ${warnBytes} bytes (${warnKiB} KiB) and the hard line is ${hardBytes} bytes (${hardKiB} KiB) in consumer projects`);
+    } else if (size > warnBytes) {
+      warnings.push(`${rel} is ${size} bytes; the advisory line is ${warnBytes} bytes (${warnKiB} KiB) and the hard limit is ${hardBytes} bytes (${hardKiB} KiB)`);
+    }
+  }
+}
+
+for (const w of warnings) console.error(`warning: ${w}`);
 for (const e of errors) console.error(e);
 if (errors.length) { console.error(`${errors.length} problem(s) found.`); process.exit(1); }
 console.log('memory is clean.');

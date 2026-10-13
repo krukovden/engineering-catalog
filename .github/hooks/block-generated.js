@@ -5,6 +5,13 @@
 // doc-sourced only (copilot-facts.md §4.1) — unlike remind-rebuild.js's twin, it has not been
 // captured live against a running Copilot CLI the way copilot-facts.md §6 verifies other hook
 // behaviour. Re-verify it there before trusting it on a materially newer CLI.
+//
+// Fails open. On Copilot any non-zero preToolUse exit denies (§4.1), so a missing `node` or a
+// crash here would block every edit in the repository. block-generated.json therefore passes
+// exit 2 through and turns every other exit into 0. That is safe for this script and only this
+// shape of script: Node itself never exits 2 (a crash is 1, a missing node is 127), so 2 is
+// always the deliberate deny below. Generated deny hooks use a stricter rule — exit 0 always,
+// JSON decides (lib/hooks.js) — because `sh` can exit 2 on its own.
 // toolArgs parsing and the matcher/trusted-folder/JSON-stdout caveats mirror remind-rebuild.js —
 // see that file's header and copilot-facts.md §6.
 //
@@ -20,7 +27,8 @@ const GENERATED = [
   /^plugin\.json$/,
   /^\.claude-plugin\/(marketplace|plugin)\.json$/,
   /^hooks\/hooks\.json$/,
-  /^\.copilot-plugin\/(agents\/[^/]+\.agent\.md|hooks\.json)$/,
+  /^\.copilot-plugin\/(agents\/[^/]+\.agent\.md|hooks\.json|workflows\/[^/]+\/SKILL\.md)$/,
+  /^\.claude-workflows\/[^/]+\/SKILL\.md$/,
   /^\.github\/plugin\/marketplace\.json$/,
   /^(skills|agents|workflows)\/[^/]+\/README\.md$/,
 ];

@@ -162,6 +162,48 @@ test('update reinstalls changed units, asks about local edits, removes stale fil
   assert.ok(!fs.readFileSync(path.join(home, '.claude/skills/alpha/SKILL.md'), 'utf8').includes('local edit'));
 });
 
+test('update never overwrites a foreign file at a newly planned path without consent', async () => {
+  // Regression: cmdUpdate only checked receipt-listed files, so a file the catalog newly ships
+  // (absent from the old receipt) replaced a hand-authored file at that path — even with --keep-local.
+  const setup = async () => {
+    const root = catalogRoot('1.0.0');
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'home-'));
+    await exec(['install', '--bundle', 'qa', '--target', 'claude'], { root, cwd: home, home });
+    fs.writeFileSync(path.join(root, 'skills/qa/gamma/extra.md'), 'catalog content\n');
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'x', version: '1.1.0', description: 'd' }));
+    build({ root });
+    const dest = path.join(home, '.claude/skills/gamma/extra.md');
+    fs.writeFileSync(dest, 'USER CONTENT\n');
+    return { root, home, dest };
+  };
+  const receiptHash = (home) => {
+    const receipt = JSON.parse(fs.readFileSync(path.join(home, '.engineering-catalog/receipt.json'), 'utf8'));
+    return receipt.installs[0].units.find((u) => u.name === 'gamma').files['.claude/skills/gamma/extra.md'];
+  };
+
+  const a = await setup();
+  const ra = await exec(['update', '--global', '--keep-local'], { root: a.root, cwd: a.home, home: a.home });
+  assert.equal(ra.code, 0, ra.err);
+  assert.equal(fs.readFileSync(a.dest, 'utf8'), 'USER CONTENT\n');
+  assert.match(ra.out, /already exists and differs/);
+  assert.equal(receiptHash(a.home), 'unmanaged');
+  // Still flagged on the next run, so it is never overwritten silently later either.
+  const ra2 = await exec(['update', '--global'], { root: a.root, cwd: a.home, home: a.home, input: 'n\n' });
+  assert.equal(ra2.code, 0, ra2.err);
+  assert.equal(fs.readFileSync(a.dest, 'utf8'), 'USER CONTENT\n');
+
+  const b = await setup();
+  const rb = await exec(['update', '--global'], { root: b.root, cwd: b.home, home: b.home, input: 'n\n' });
+  assert.equal(rb.code, 0, rb.err);
+  assert.match(rb.out, /Overwrite \.claude\/skills\/gamma\/extra\.md\?/);
+  assert.equal(fs.readFileSync(b.dest, 'utf8'), 'USER CONTENT\n');
+
+  const c = await setup();
+  const rc = await exec(['update', '--global', '--overwrite'], { root: c.root, cwd: c.home, home: c.home });
+  assert.equal(rc.code, 0, rc.err);
+  assert.equal(fs.readFileSync(c.dest, 'utf8'), 'catalog content\n');
+});
+
 test('update refuses to downgrade', async () => {
   const root = catalogRoot('2.0.0');
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'home-'));

@@ -1,0 +1,36 @@
+{
+  "count": 4,
+  "value": [
+    {
+      "id": 4120, "rev": 7,
+      "fields": {
+        "System.TeamProject": "Orion", "System.WorkItemType": "Feature", "System.State": "In Progress",
+        "System.Title": "Report page exports",
+        "System.Description": "<div>Users download what the report page shows, as CSV or PDF.</div>",
+        "System.AreaPath": "Orion\\Reporting", "System.IterationPath": "Orion\\Sprint 41",
+        "System.ChangedDate": "2026-10-10T09:00:00Z"
+      },
+      "relations": [
+        { "rel": "ArtifactLink", "url": "vstfs:///Git/PullRequestId/p-1%2Frepo-api%2F4821", "attributes": { "name": "Pull Request" } }
+      ]
+    },
+    {
+      "id": 4133, "rev": 2,
+      "fields": {
+        "System.TeamProject": "Orion", "System.WorkItemType": "Feature", "System.State": "New",
+        "System.Title": "Dashboard filters", "System.Description": "Filter the report by date range.",
+        "System.AreaPath": "Orion\\Reporting", "System.IterationPath": "Orion",
+        "System.ChangedDate": "2026-05-01T09:00:00Z"
+      }
+    },
+    {
+      "id": 4150, "rev": 1,
+      "fields": {
+        "System.TeamProject": "Orion", "System.WorkItemType": "Feature", "System.State": "New",
+        "System.Title": "Login hardening", "System.Description": "Lockout and MFA.",
+        "System.AreaPath": "Orion\\Reporting", "System.IterationPath": "Orion\\Sprint 41",
+        "System.ChangedDate": "2026-10-11T09:00:00Z"
+      }
+    }
+  ]
+}

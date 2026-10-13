@@ -1,0 +1,8 @@
+a
+b
+CS0103: name does not exist
+##[error]Build failed
+c
+d
+e
+f

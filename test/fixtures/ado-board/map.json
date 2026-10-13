@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "organization": "https://dev.azure.com/acme",
+  "project": "Orion",
+  "discovered": "2026-10-01T00:00:00Z",
+  "types": {
+    "Bug": {
+      "states": { "New": "todo", "Active": "doing", "Resolved": "verify", "Closed": "done", "Removed": "removed" },
+      "targets": { "todo": "New", "doing": "Active", "verify": "Resolved", "done": "Closed" }
+    },
+    "User Story": {
+      "states": { "New": "todo", "Active": "doing", "Resolved": "verify", "Closed": "done", "Removed": "removed" },
+      "targets": { "todo": "New", "doing": "Active", "verify": "Resolved", "done": "Closed" }
+    },
+    "Task": {
+      "states": { "To Do": "todo", "In Progress": "doing", "Done": "done", "Removed": "removed" },
+      "targets": { "todo": "To Do", "doing": "In Progress", "done": "Done" }
+    }
+  }
+}

@@ -163,3 +163,60 @@ test('gradeCase: throws a clear error when an llm/baseline grader has no injecte
   const caseDef = { name: 'case-4', graders: [{ name: 'x', type: 'llm', criteria: 'rubric' }] };
   await assert.rejects(() => gradeCase(caseDef, t, {}), /no judge was injected/);
 });
+
+test('a regex grader with target { source: file } reads the workdir file, not the reply', () => {
+  const t = trace({ reply: 'marker v=1 is in CLAUDE.md' });
+  const grader = { type: 'regex', pattern: 'start v=1', target: { source: 'file', path: 'CLAUDE.md' } };
+  assert.equal(gradeRegex(grader, t).passed, false, 'no file: the reply must not satisfy it');
+  fs.writeFileSync(path.join(t.workdir, 'CLAUDE.md'), 'start v=0');
+  assert.equal(gradeRegex(grader, t).passed, false, 'wrong marker in the file');
+  fs.writeFileSync(path.join(t.workdir, 'CLAUDE.md'), '<!-- start v=1 -->');
+  assert.equal(gradeRegex(grader, t).passed, true);
+});
+
+test('the shipped ado-pull-request and memory-init graders reject their counterexamples', () => {
+  const { loadSuite } = require('../scripts/eval/cases');
+  const cases = loadSuite({ root: path.join(__dirname, '..') }).cases;
+  const byName = (n) => cases.find((c) => c.name === n);
+  const fired = (n) => byName(n).graders.find((g) => g.name === 'skill-fired');
+  for (const n of ['trigger-show-my-pr-dashboard', 'trigger-update-drifted-pr-metadata']) {
+    assert.equal(gradeToolUsed(fired(n), trace({ toolCalls: [{ name: 'skill', input: { skill: 'catalog-freshness' } }] })).passed, false, n);
+    assert.equal(gradeToolUsed(fired(n), trace({ toolCalls: [{ name: 'skill', input: { skill: 'ado-pull-request' } }] })).passed, true, n);
+  }
+  const marker = byName('creates-index-and-units').graders.find((g) => g.name === 'versioned-memory-marker');
+  const t = trace({ reply: '<!-- engineering-catalog:memory:start v=1 -->' });
+  assert.equal(gradeRegex(marker, t).passed, false, 'the marker in the reply is not the marker in CLAUDE.md');
+  fs.writeFileSync(path.join(t.workdir, 'CLAUDE.md'), '<!-- engineering-catalog:memory:start v=1 -->\n');
+  assert.equal(gradeRegex(marker, t).passed, true);
+});
+
+test('the memory-writer handoff scenario grants Task and only passes diff verification after the handoff', () => {
+  const { loadSuite } = require('../scripts/eval/cases');
+  const cases = loadSuite({ root: path.join(__dirname, '..') }).cases;
+  const scenario = cases.find((c) => c.name === 'memory-writer-handoff-verifies-diff');
+  assert.ok(scenario.allowedTools.includes('Task'));
+  const fired = scenario.graders.find((g) => g.name === 'memory-writer-fired');
+  assert.equal(gradeToolUsed(fired, trace({
+    toolCalls: [{ name: 'task', input: { subagent_type: 'memory-writer' }, success: true }],
+    raw: 'task({"subagent_type":"memory-writer"}) -> true\n\nok',
+  })).passed, true);
+  const verified = scenario.graders.find((g) => g.name === 'verified-diff');
+  const T = '{"subagent_type":"memory-writer"}';
+  const D = '{"command":"git diff --stat"}';
+  const grade = (events) => gradeRegex(verified, {
+    reply: '', toolCalls: [], workdir: scenario.dir,
+    raw: `list\n\ntimeline:\n${events.join('\n')}\n\nok`,
+  }).passed;
+  assert.equal(grade([`start bash(${D}) -> true`, `end bash(${D}) -> true`, `start task(${T}) -> true`, `end task(${T}) -> true`]), false,
+    'a git command before the handoff does not prove verification');
+  assert.equal(grade([`start task(${T}) -> true`, `start bash(${D}) -> true`, `end bash(${D}) -> true`, `end task(${T}) -> true`]), false,
+    'a diff that starts while the task is still running (start order task, diff; completion order diff, task) is not verification');
+  assert.equal(grade([`start task(${T}) -> true`, `end task(${T}) -> true`, `start bash(${D}) -> true`, `end bash(${D}) -> true`]), true,
+    'a diff that starts after the handoff completed proves verification');
+  const A = '{"agent_type":"memory-writer"}';
+  assert.equal(grade([`start task(${A}) -> true`, `end task(${A}) -> true`, `start bash(${D}) -> true`]), true, 'Copilot agent_type shape');
+  assert.equal(gradeToolUsed(fired, trace({
+    toolCalls: [{ name: 'task', input: { agent_type: 'memory-writer' }, success: true }],
+  })).passed, true, 'agent_type input also fires the grader');
+  assert.ok(scenario.graders.find((g) => g.name === 'pending-drained'), 'the resulting queue state is graded too');
+});

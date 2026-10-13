@@ -4,7 +4,8 @@
     "preToolUse": [
       {
         "type": "command",
-        "command": "node .github/hooks/block-generated.js",
+        "bash": "node .github/hooks/block-generated.js; s=$?; [ \"$s\" -eq 2 ] && exit 2; exit 0",
+        "powershell": "try { node .github/hooks/block-generated.js; if ($LASTEXITCODE -eq 2) { exit 2 } } catch { }; exit 0",
         "matcher": "create|edit|str_replace_editor|apply_patch",
         "timeoutSec": 5
       }

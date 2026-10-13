@@ -1,0 +1,10 @@
+{"value":[
+{"id":11,"status":"active","isDeleted":false,"threadContext":{"filePath":"/src/Export.cs","rightFileStart":{"line":88,"offset":1}},
+ "comments":[{"id":1,"commentType":"text","author":{"displayName":"Ann Reviewer"},"content":"Null check missing here.","publishedDate":"2026-10-01T10:00:00Z"},
+             {"id":2,"commentType":"text","author":{"displayName":"Bob Dev"},"content":"Looking.","publishedDate":"2026-10-01T11:00:00Z"}]},
+{"id":12,"status":"fixed","isDeleted":false,"threadContext":{"filePath":"/src/Old.cs","rightFileStart":{"line":3,"offset":1}},
+ "comments":[{"id":1,"commentType":"text","author":{"displayName":"Ann Reviewer"},"content":"Rename.","publishedDate":"2026-10-01T10:00:00Z"}]},
+{"id":13,"status":"active","isDeleted":false,"comments":[{"id":1,"commentType":"system","author":{"displayName":"Policy"},"content":"Reviewer voted 5"}]},
+{"id":14,"status":"active","isDeleted":true,"comments":[{"id":1,"commentType":"text","content":"gone"}]},
+{"id":15,"status":"pending","isDeleted":false,"comments":[{"id":1,"commentType":"text","author":{"displayName":"Ann Reviewer"},"content":"Why a list here?","publishedDate":"2026-10-02T09:00:00Z"}]}
+]}

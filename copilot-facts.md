@@ -147,6 +147,41 @@ yet been captured live against a running Copilot CLI, so `.github/hooks/block-ge
 (which relies on it) carries the same caveat and should be re-verified live before being trusted
 on a materially newer CLI.
 
+Because any non-zero exit denies, a deny hook whose runtime is missing (`node` not on PATH, a
+failed `cd`, a script that throws) blocks **every** matching call. So a deny hook's command must
+fail open itself: the generated one always exits 0 and lets the JSON decide (`lib/hooks.js`);
+`.github/hooks/block-generated.json` passes the script's deliberate exit 2 through and turns
+every other exit into 0.
+
+**What unlocks `hooks/protected-branch` on Copilot.** It ships `"platforms": ["claude"]` because
+`COPILOT_DENY_CAPTURED` (`lib/hooks.js`) is false. Its Copilot command, `.ps1` twin and flat deny
+shape (`--copilot` / `-Copilot`) are already written and tested by rendering. To ship it: on a live
+Copilot CLI, run a `preToolUse` hook matching `bash|powershell` that prints the flat deny JSON and
+exits 0, ask the model to run a shell command, record in §6 that the call did not run and that the
+reason reached the model, then set `COPILOT_DENY_CAPTURED = true` and add `"copilot"` to the hook's
+`platforms`.
+
+### 4.2 Claude Code, for contrast: exit 2 and stdout JSON (live, Claude Code 2.1.296)
+
+Not a Copilot fact; kept here because the deny shapes are only meaningful side by side. Claude
+Code's hooks reference (<https://code.claude.com/docs/en/hooks>, "Exit code 2", read
+2026-10-12) says a `PreToolUse` hook that exits 2 blocks, and that Claude Code still reads a
+JSON decision on stdout and uses its reason instead of stderr. Only exit 2 blocks: a crash, any
+other exit or a hook that cannot start is a non-blocking error and the call goes ahead.
+
+Captured on 2026-10-12 with `claude -p` (haiku) and a project `PreToolUse` hook on `Write` that
+printed `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+"permissionDecisionReason": "JSON-REASON-TOKEN-9921"}}` and a different token on stderr:
+
+| Hook exit | File written? | Tool result the model saw |
+|---|---|---|
+| 2 | no | `Error: PreToolUse:Write hook error: JSON-REASON-TOKEN-9921` |
+| 0 | no | `Error: PreToolUse:Write hook error: JSON-REASON-TOKEN-9921` |
+
+The stderr token appeared in neither. So `.claude/hooks/block-generated.js` (JSON, then exit 2)
+does deliver its reason; exit 0 + JSON is the form the reference recommends, and the one
+generated deny hooks use.
+
 ---
 
 ## 5. Instruction files (GitHub reference, read 2026-09-17)
@@ -164,6 +199,14 @@ Copilot CLI reads and **merges** all of these, with **no defined precedence orde
 - `CLAUDE.md`
 - `GEMINI.md`
 - any directory named in `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`
+
+**Live, 2026-10-12** (copilot CLI in `evals/container`-style image, `-p` runs): a file at
+`$HOME/.copilot/instructions/<name>.instructions.md` (`applyTo: "**"` frontmatter) saying "at the
+start of every session run the `catalog-freshness` skill" made the model run it in 5/5 fresh
+sessions opened with a greeting; without the file it ran in some sessions only. Told only to
+"relay any line it prints", the model ran the script and dropped its one-line output (1/1);
+told to "begin your reply with that line, word for word", it led with the line (2/2). This is
+what `session-start: true` generates.
 
 Two consequences for this repository. First, Copilot CLI reads `AGENTS.md` (the contract) and
 `CLAUDE.md` (a one-line `@AGENTS.md` import) both natively, so the contract already reaches

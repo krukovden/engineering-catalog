@@ -1,0 +1,11 @@
+{
+  "count": 6,
+  "value": [
+    { "name": "To Do", "color": "b2b2b2", "category": "Proposed" },
+    { "name": "In Progress", "color": "007acc", "category": "InProgress" },
+    { "name": "Ready for Testing", "color": "007acc", "category": "InProgress" },
+    { "name": "In Testing", "color": "007acc", "category": "InProgress" },
+    { "name": "Done", "color": "339933", "category": "Completed" },
+    { "name": "Removed", "color": "ffffff", "category": "Removed" }
+  ]
+}

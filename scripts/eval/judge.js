@@ -49,8 +49,8 @@ function spawnJudge(prompt, judge) {
     child.stdout.on('data', (d) => { stdout += d; });
     child.stderr.on('data', (d) => { stderr += d; });
     child.on('error', reject);
-    child.on('close', (code) => {
-      if (code !== 0) return resolve({ text: '', error: tail(stderr) });
+    child.on('close', (code, signal) => {
+      if (code !== 0) return resolve({ text: '', failed: true, error: tail(stderr) || `exit ${code ?? signal}` });
       try {
         const parsed = JSON.parse(stdout);
         return resolve({ text: parsed.result || parsed.text || stdout });
@@ -68,7 +68,10 @@ async function runJudge({ grader, trace, judge, exec = spawnJudge }) {
   const votes = [];
   for (let i = 0; i < 3; i += 1) {
     // eslint-disable-next-line no-await-in-loop -- three sequential, cheap, deliberately serial votes
-    const { text } = await exec(prompt, judge);
+    const { text, error, failed } = await exec(prompt, judge);
+    // An unavailable judge is infrastructure, not evidence about the run: surface it so the run is
+    // classified invalid instead of counting an empty reply as a FAIL vote.
+    if (failed || error) throw Object.assign(new Error(`judge process failed: ${error || 'no diagnostics'}`), { judgeFailure: true });
     votes.push(parseVerdict(text));
   }
   const passCount = votes.filter((v) => v.passed).length;

@@ -1,0 +1,298 @@
+{
+  "id": "PreToolUse.protected-branch",
+  "scenarios": [
+    {
+      "name": "commit on main in an Azure Repos repository is denied",
+      "setup": {
+        "repo": {
+          "branch": "main",
+          "remote": "https://org@dev.azure.com/org/proj/_git/repo"
+        }
+      },
+      "stdin": {
+        "claude": {
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "git commit -m 'fix: x'"
+          }
+        },
+        "copilot": {
+          "toolName": "bash",
+          "toolArgs": {
+            "command": "git commit -m 'fix: x'"
+          }
+        }
+      },
+      "expect": {
+        "exit": 0,
+        "decision": "deny",
+        "reason": "^WHAT: .*\\nWHY: .*\\nFIX: git switch -c "
+      }
+    },
+    {
+      "name": "commit on master with a catalog receipt is denied",
+      "setup": {
+        "repo": {
+          "branch": "master",
+          "receipt": true
+        }
+      },
+      "stdin": {
+        "claude": {
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "git add . && git commit -m x"
+          }
+        },
+        "copilot": {
+          "toolName": "bash",
+          "toolArgs": {
+            "command": "git add . && git commit -m x"
+          }
+        }
+      },
+      "expect": {
+        "exit": 0,
+        "decision": "deny",
+        "reason": "^WHAT: .*\\nWHY: .*\\nFIX: git switch -c "
+      }
+    },
+    {
+      "name": "a commit through a -c alias on main is denied",
+      "setup": {
+        "repo": {
+          "branch": "main",
+          "remote": "https://org@dev.azure.com/org/proj/_git/repo"
+        }
+      },
+      "stdin": {
+        "claude": {
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "git -c alias.ci=commit ci -m x"
+          }
+        },
+        "copilot": {
+          "toolName": "bash",
+          "toolArgs": {
+            "command": "git -c alias.ci=commit ci -m x"
+          }
+        }
+      },
+      "expect": {
+        "exit": 0,
+        "decision": "deny",
+        "reason": "^WHAT: .*\\nWHY: .*\\nFIX: git switch -c "
+      }
+    },
+    {
+      "name": "a heredoc commit on main is denied on the invocation",
+      "setup": {
+        "repo": {
+          "branch": "main",
+          "remote": "https://org@dev.azure.com/org/proj/_git/repo"
+        }
+      },
+      "stdin": {
+        "claude": {
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "git commit -m \"$(cat <<'EOF'\nfix: thing\nEOF\n)\""
+          }
+        },
+        "copilot": {
+          "toolName": "bash",
+          "toolArgs": {
+            "command": "git commit -m \"$(cat <<'EOF'\nfix: thing\nEOF\n)\""
+          }
+        }
+      },
+      "expect": {
+        "exit": 0,
+        "decision": "deny",
+        "reason": "^WHAT: .*\\nWHY: .*\\nFIX: git switch -c "
+      }
+    },
+    {
+      "name": "a commit on a feature branch goes ahead",
+      "setup": {
+        "repo": {
+          "branch": "feature/ADO-1-x",
+          "remote": "https://org@dev.azure.com/org/proj/_git/repo"
+        }
+      },
+      "stdin": {
+        "claude": {
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "git commit -m x"
+          }
+        },
+        "copilot": {
+          "toolName": "bash",
+          "toolArgs": {
+            "command": "git commit -m x"
+          }
+        }
+      },
+      "expect": {
+        "exit": 0,
+        "decision": "allow"
+      }
+    },
+    {
+      "name": "main in a GitHub repository with no receipt goes ahead",
+      "setup": {
+        "repo": {
+          "branch": "main",
+          "remote": "https://github.com/me/notes.git"
+        }
+      },
+      "stdin": {
+        "claude": {
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "git commit -m x"
+          }
+        },
+        "copilot": {
+          "toolName": "bash",
+          "toolArgs": {
+            "command": "git commit -m x"
+          }
+        }
+      },
+      "expect": {
+        "exit": 0,
+        "decision": "allow"
+      }
+    },
+    {
+      "name": "git is missing — fails open",
+      "setup": {
+        "noGit": true
+      },
+      "stdin": {
+        "claude": {
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "git commit -m x"
+          }
+        },
+        "copilot": {
+          "toolName": "bash",
+          "toolArgs": {
+            "command": "git commit -m x"
+          }
+        }
+      },
+      "expect": {
+        "exit": 0,
+        "decision": "allow"
+      }
+    },
+    {
+      "name": "heredoc text mentioning git commit on a feature branch goes ahead",
+      "setup": {
+        "repo": {
+          "branch": "feature/ADO-1-x",
+          "remote": "https://org@dev.azure.com/org/proj/_git/repo"
+        }
+      },
+      "stdin": {
+        "claude": {
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "git commit -m \"$(cat <<'EOF'\nfix: thing\nEOF\n)\""
+          }
+        },
+        "copilot": {
+          "toolName": "bash",
+          "toolArgs": {
+            "command": "git commit -m \"$(cat <<'EOF'\nfix: thing\nEOF\n)\""
+          }
+        }
+      },
+      "expect": {
+        "exit": 0,
+        "decision": "allow"
+      }
+    },
+    {
+      "name": "heredoc payload containing git commit on main is not an invocation",
+      "setup": {
+        "repo": {
+          "branch": "main",
+          "remote": "https://org@dev.azure.com/org/proj/_git/repo"
+        }
+      },
+      "stdin": {
+        "claude": {
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "cat > notes.md <<'EOF'\ngit commit -m x\nEOF"
+          }
+        },
+        "copilot": {
+          "toolName": "bash",
+          "toolArgs": {
+            "command": "cat > notes.md <<'EOF'\ngit commit -m x\nEOF"
+          }
+        }
+      },
+      "expect": {
+        "exit": 0,
+        "decision": "allow"
+      }
+    },
+    {
+      "name": "git add on main goes ahead",
+      "setup": {
+        "repo": {
+          "branch": "main",
+          "remote": "https://org@dev.azure.com/org/proj/_git/repo"
+        }
+      },
+      "stdin": {
+        "claude": {
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "git add -A"
+          }
+        },
+        "copilot": {
+          "toolName": "bash",
+          "toolArgs": {
+            "command": "git add -A"
+          }
+        }
+      },
+      "expect": {
+        "exit": 0,
+        "decision": "allow"
+      }
+    },
+    {
+      "name": "not a repository — fails open",
+      "setup": {},
+      "stdin": {
+        "claude": {
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "git commit -m x"
+          }
+        },
+        "copilot": {
+          "toolName": "bash",
+          "toolArgs": {
+            "command": "git commit -m x"
+          }
+        }
+      },
+      "expect": {
+        "exit": 0,
+        "decision": "allow"
+      }
+    }
+  ]
+}

@@ -80,3 +80,15 @@ level *is* the ownership axis — the thing §3.1 enforces and every README, bun
 promotion `git mv` is built on. Adopting the standard means dismantling it, and Claude Code's
 reference does not mention the standard at all, so the trade would buy portability to one CLI that
 already loads us. Revisit when Claude Code ships support; `copilot-facts.md` §7 holds the captures.
+
+### e-20261012-afdc Promoted workflows ship in both plugin manifests as generated skill folders, one per platform
+- status: active
+- evidence: inferred
+- pr: none
+- sha-at-write: 127faee2193a55ec07fee4a107406a658a35392d
+- merged-sha: none
+- supersedes: none
+- superseded-by: none
+- date: 2026-10-12
+
+Until 127faee a workflow reached a person only through `engcat install`; the plugin manifests listed owner skill folders, so anyone who installed the catalog as a Claude or Copilot plugin got no workflows. `generate()` now renders each promoted workflow as a skill and commits it twice: `.claude-workflows/<name>/SKILL.md` (with `disable-model-invocation: true`) and `.copilot-plugin/workflows/<name>/SKILL.md` (without it), each parent folder appended to its manifest's `skills` list only when a workflow ships. Two folders because the two renderings must differ ([[target-adapters]] e-20260915-a0c1: on Copilot the flag also hides the skill from `/name`), and a single shared folder would either make the workflow model-invocable on Claude or unreachable on Copilot. Claude's folder sits at the plugin root because Claude's plugin docs keep components out of `.claude-plugin/`. Each rendering is asserted byte-equal to what its adapter installs, so the plugin path and the `engcat` path cannot drift. The cost: two more generated trees per workflow, a stale-folder sweep in `build()` like the one for Copilot agent files, and the dev-side `block-generated` path list grew to cover them. The folder names are now part of what installed plugins read, so renaming them is a manifest change for every user.

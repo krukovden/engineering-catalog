@@ -1,0 +1,7 @@
+{"value":[
+{"status":"rejected","configuration":{"type":{"displayName":"Build"},"settings":{"displayName":"CI"}},"context":{"buildId":9001}},
+{"status":"rejected","configuration":{"type":{"displayName":"Build"},"settings":{"displayName":"CI"}},"context":{"buildId":9001}},
+{"status":"approved","configuration":{"type":{"displayName":"Build"}},"context":{"buildId":9002}},
+{"status":"rejected","configuration":{"type":{"displayName":"Minimum number of reviewers"}},"context":{}},
+{"status":"broken","configuration":{"type":{"displayName":"Build"}},"context":{"buildId":9003}}
+]}

@@ -36,15 +36,15 @@ test('build writes every artifact with the package version', () => {
   assert.deepEqual(catalog.bundles.map((b) => b.name), ['developers', 'qa']);
   const plugin = readJson(path.join(root, '.claude-plugin/plugin.json'));
   assert.equal(plugin.version, '9.9.9');
-  // Claude's manifest lists PARENT folders (each holding <name>/SKILL.md), owner folders only.
-  assert.deepEqual(plugin.skills, ['./skills/shared', './skills/developers', './skills/qa']);
+  // Claude's manifest lists PARENT folders (each holding <name>/SKILL.md): owner folders, then rendered workflows.
+  assert.deepEqual(plugin.skills, ['./skills/shared', './skills/developers', './skills/qa', './.claude-workflows']);
   assert.deepEqual(plugin.agents, ['./agents/shared/helper.md', './agents/qa/triager.md']);
   assert.equal(plugin.hooks, './hooks/hooks.json');
   assert.equal(readJson(path.join(root, '.claude-plugin/marketplace.json')).plugins[0].version, '9.9.9');
   // Copilot's manifest: the same parent folders; agents is ONE directory of <name>.agent.md; hooks in Copilot format.
   const copilot = readJson(path.join(root, 'plugin.json'));
   assert.equal(copilot.version, '9.9.9');
-  assert.deepEqual(copilot.skills, plugin.skills);
+  assert.deepEqual(copilot.skills, ['./skills/shared', './skills/developers', './skills/qa', './.copilot-plugin/workflows']);
   assert.equal(copilot.agents, './.copilot-plugin/agents/');
   assert.equal(copilot.hooks, './.copilot-plugin/hooks.json');
   assert.deepEqual(fs.readdirSync(path.join(root, '.copilot-plugin/agents')).sort(), ['helper.agent.md', 'triager.agent.md']);
@@ -114,6 +114,37 @@ test('build deletes stale Copilot agent files; check mode reports them without d
   assert.deepEqual(build({ root }).removed, ['.copilot-plugin/agents/ghost.agent.md']);
   assert.deepEqual(fs.readdirSync(path.join(root, '.copilot-plugin/agents')).sort(), ['helper.agent.md', 'triager.agent.md']);
   assert.deepEqual(build({ root, check: true }).removed, []);
+});
+
+test('a promoted workflow is discoverable through both plugin layouts, as its adapter renders it', () => {
+  const root = tmpCatalog();
+  build({ root });
+  // What a plugin host finds: each `skills` entry is a parent directory of <name>/SKILL.md.
+  const discovered = (manifest) => {
+    const found = new Map();
+    for (const dir of [].concat(manifest.skills)) {
+      const abs = path.join(root, dir);
+      for (const name of fs.readdirSync(abs)) {
+        const file = path.join(abs, name, 'SKILL.md');
+        if (fs.existsSync(file)) found.set(name, fs.readFileSync(file, 'utf8'));
+      }
+    }
+    return found;
+  };
+  const flow = scanUnits({ root, folders: ['qa'] }).units.find((u) => u.name === 'flow');
+  const claudeSkills = discovered(readJson(path.join(root, '.claude-plugin/plugin.json')));
+  const copilotSkills = discovered(readJson(path.join(root, 'plugin.json')));
+  assert.equal(claudeSkills.get('flow'), require('../lib/adapters/claude').outputs(flow, 'global')[0].content.toString('utf8'));
+  assert.equal(copilotSkills.get('flow'), require('../lib/adapters/copilot').outputs(flow, 'global')[0].content.toString('utf8'));
+  assert.match(claudeSkills.get('flow'), /\ndisable-model-invocation: true\n/);
+  assert.doesNotMatch(copilotSkills.get('flow'), /disable-model-invocation/);
+  // A workflow no source produces any more is stale, like a stale agent file.
+  const ghost = path.join(root, '.copilot-plugin/workflows/ghost/SKILL.md');
+  fs.mkdirSync(path.dirname(ghost), { recursive: true });
+  fs.writeFileSync(ghost, '---\nname: ghost\n---\n');
+  assert.deepEqual(build({ root, check: true }).removed, ['.copilot-plugin/workflows/ghost/SKILL.md']);
+  build({ root });
+  assert.ok(!fs.existsSync(path.dirname(ghost)), 'stale workflow folder removed');
 });
 
 test('unpromoted units reach no artifact; promoted reach README tables', () => {

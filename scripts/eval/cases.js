@@ -89,6 +89,12 @@ function loadGraders(caseDir, relDir, errors) {
     const need = { regex: 'pattern', tool_used: 'tool', file_exists: 'path', baseline: 'baseline_file' }[grader.type];
     if (need && grader[need] === undefined) errors.push(`${where}: a ${grader.type} grader needs "${need}"`);
     if (grader.type === 'tool_order' && (!grader.before || !grader.after)) errors.push(`${where}: a tool_order grader needs "before" and "after"`);
+    // The Copilot arm grades with JavaScript's RegExp: inline modifiers such as (?i) or (?s)
+    // throw there, so the case could never be graded. Use `flags` and [\s\S] instead.
+    for (const [key, flags] of [['pattern', grader.flags], ['input_match', undefined]]) {
+      if (typeof grader[key] !== 'string') continue;
+      try { new RegExp(grader[key], flags || ''); } catch (e) { errors.push(`${where}: ${key} is not a JavaScript regular expression (${e.message}) — use "flags" and [\\s\\S], not inline (?i)/(?s)`); }
+    }
     if (grader.type === 'llm' && !grader.criteria) errors.push(`${where}: an llm grader needs a rubric in its body`);
     return grader;
   });

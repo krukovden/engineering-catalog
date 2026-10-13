@@ -26,6 +26,8 @@ A model-invoked **description** does two jobs — state what the skill is, and l
 - **Front-load the skill's leading word** — the description is where it does its invocation work.
 - **One trigger per branch.** Synonyms that rename a single branch are **duplication** — "build features using TDD … asks for test-first development" is one branch written twice. Collapse them; keep only genuinely distinct branches.
 - **Cut identity that's already in the body.** Keep the description to triggers, plus any "when another skill needs…" reach clause.
+- **Negative scoping ("When NOT to use").** For model-invoked skills and router skills, explicitly specify when _not_ to use the skill, directing the model to the appropriate alternative (e.g. "Do not use for X; use /other-skill instead"). Dropping negative-scoping guidance measurably increases false-invocation rates because models over-trigger when adjacent domains lack an explicit negative boundary.
+- **Back negative boundaries with evals.** Every "When NOT to use" exclusion in a model-invoked skill must be backed by at least one `trigger:negative` eval case under `evals/<unit>/` confirming the agent refrains from invoking the skill on adjacent tasks.
 
 ## Information hierarchy
 
@@ -39,9 +41,22 @@ A demanding completion criterion drives thorough **legwork** — the digging the
 
 Push too little down and the top bloats; push too much and you hide material the agent actually needs. That tension is the whole decision.
 
-**Progressive disclosure** is the move down the ladder — out of `SKILL.md` into a linked file — so the top stays legible. Mechanics: a linked `.md` file in the skill folder, named for what it holds (this skill discloses its full definitions to `GLOSSARY.md`). Some skills are used in more than one way, and each distinct way is a **branch** — different runs taking different paths through the skill. Branching is the cleanest disclosure test: inline what every branch needs, and push behind a pointer what only some branches reach. A **context pointer**'s _wording_, not its target, decides when and how reliably the agent reaches the material.
+**Progressive disclosure** is the move down the ladder — out of `SKILL.md` into a linked file — so the top stays legible. Mechanics: a linked `.md` file in the skill folder, named for what it holds (this skill discloses its full definitions to [`GLOSSARY.md`](GLOSSARY.md)).
 
-Where the ladder decides _how far down_ a piece sits, **co-location** decides _what sits beside it_ once there: keep a concept's definition, rules, and caveats under one heading rather than scattered, so reading one part brings its neighbours with it.
+- **Decompose on conditionality, not size.** Split a sub-file out *only* when it is read *conditionally* — a mode branch (e.g. subagent dispatch vs direct execution), an edge-case / failure / degrade path, or a template used only in some runs. Disclosure earns its keep by letting the agent *skip* reading the sub-file when that branch does not fire. Content read on every invocation must stay inline in `SKILL.md`; splitting always-read content forces an extra model read-turn per run for content the agent was always going to load, causing pure latency with zero disclosure benefit. Size is not the trigger: a 350-line SOP whose every step always runs belongs in one file; a 150-line file with three rarely-hit edge-case sections should split those out.
+- **Context pointers decide reach.** A **context pointer**'s _wording_, not its target, decides when and how reliably the agent reaches the material.
+- **Co-location.** Keep a concept's definition, rules, and caveats under one heading rather than scattered, so reading one part brings its neighbours with it.
+
+## Instruction economy
+
+The instruction budget is finite — every added line dilutes every other rule. Pay for new prose by deleting elsewhere:
+
+- **Numeric caps over adjectives.** "≤3 bullets", "≤15 lines" are followed; "be concise", "keep it brief" are ignored. Write the number: an exact ceiling provides a measurable completion target.
+- **Ceilings, never floors.** A minimum length forces the model to pad its response to reach the floor. State upper bounds only.
+- **Cap the artifact, not the reasoning.** "Investigate thoroughly, report in ≤N words" — capping reasoning itself degrades accuracy on complex tasks. Restrict the output length, never the investigation or thought required to produce it.
+- **Ration emphasis.** MUST/NEVER earn their weight by being rare — modern models read them literally and over-trigger. Ration them to 1–2 per file on constraints that genuinely break things, because normal prose already reads as an instruction.
+- **No "double-check" lines.** Current models self-verify; vague "double-check your work" lines waste budget without altering behaviour. Ask for a specific mechanical check (run a test, diff lists) or ask for nothing.
+- **Pair each hard rule with its one-sentence why.** Adherence measurably improves when the reason is given; a rule whose reason you cannot state in one sentence is probably not a rule.
 
 ## When to split
 
@@ -71,6 +86,24 @@ Hunt for opportunities to refactor skills to use leading words. A triad spelled 
 
 You win twice over: fewer tokens, _and_ a sharper hook for the agent to hang its thinking on. Assume every skill is carrying restatements that leading words retire — go find them.
 
+## Subagents and delegation
+
+When a skill or agent delegates work to a subagent:
+
+- **Encapsulate the boundary.** An orchestrator dispatches a subagent via exactly three things: the file path the subagent follows (SOP or step file), structured inputs, and a contract describing what comes back. The orchestrator never inlines step instructions into the spawn prompt and never reads internal draft artifacts (`arch.md`, `plan.md`); the subagent never reads orchestrator routing logic. Structured return data is the orchestrator's only routing surface.
+- **Verify claims against the diff.** Subagent summaries describe what they intended to do, not necessarily what they did. The diff is authoritative; the report is auxiliary. Before trusting a completion report, the orchestrator must inspect the actual working tree (`git status --short`, `git diff --stat`), verify every claimed modified file appears in the diff, investigate unmentioned diffs, and reconcile unexpected state before committing.
+
+Detailed dispatch contracts and the 5-step diff verification discipline are disclosed in [`references/subagent-encapsulation.md`](references/subagent-encapsulation.md).
+
+## Targeted edits of user-owned files
+
+When a skill's helper scripts or execution steps mutate structured configuration files that the user or project also owns (e.g. Copilot settings, `ado-credentials` config, `ado-board` maps, `settings.json`, YAML manifests):
+
+- **Never wholesale-serialize.** Do not use `JSON.parse` → mutate → `JSON.stringify` or raw YAML `load` → `dump`. Wholesale re-serialization destroys comments, reorders keys, and normalizes formatting across the entire file.
+- **Targeted edits with single-match assertions.** For JSON/JSONC, use targeted string replacement anchored to enclosing keys. For YAML, use an AST-preserving mutator that preserves comments and formatting. In all cases, assert the new value appears exactly once — more than one match means a sibling field was clobbered; zero matches means the anchor missed. If the assertion fails, restore backup and exit non-zero.
+
+Detailed mutation patterns and regex anchoring rules are disclosed in [`references/targeted-edits.md`](references/targeted-edits.md).
+
 ## Failure modes
 
 Use these to diagnose issues the user may be having with the skill.
@@ -79,14 +112,16 @@ Use these to diagnose issues the user may be having with the skill.
 - **Duplication** — the same meaning in more than one place. Costs maintenance and tokens, and inflates a meaning's prominence on the ladder past its real rank.
 - **Sediment** — stale layers that settle because adding feels safe and removing feels risky. The default fate of any skill without a pruning discipline.
 - **Sprawl** — a skill simply too long, even when every line is live and unique. Hurts readability and maintainability and wastes tokens. The cure is the ladder: disclose **reference** behind pointers, and split by **branch** or sequence so each path carries only what it needs.
-- **No-op** — a line the model already obeys by default, so you pay load to say nothing. The test: does it change behaviour versus the default? A weak leading word (_be thorough_ when the agent is already thorough-ish) is a no-op; the fix is a stronger word (_relentless_), not a different technique.
-- **Negation** — steering by prohibition backfires: _don't think of an elephant_ names the elephant and makes it more available, not less. Prompt the **positive** — state the target behaviour so the banned one is never spoken; keep a prohibition only as a hard guardrail you can't phrase positively, and even then pair it with what to do instead.
+- **No-op** — a line the model already obeys by default, so you pay load to say nothing. The test: does it change behaviour versus the default? Vague "double-check your work" lines, weak leading words (_be thorough_), and conversational adjectives (_be concise_) are common no-ops.
+- **Negation** — steering execution by prohibition backfires: _don't think of an elephant_ names the elephant and makes it more available, not less. Prompt the **positive** — state the target behaviour so the banned one is never spoken; keep a prohibition only as a hard guardrail you can't phrase positively, and even then pair it with what to do instead. Contrast this with invocation routing: negative scoping in a description ("When NOT to use") is required to prevent false triggers between skills.
 
 ## Applying this in the engineering catalog
 
-Three of this catalog's rules exist because of the levers above — honour them when authoring here:
+Five of this catalog's rules exist because of the levers above — honour them when authoring here:
 
 - **A skill folder is self-contained.** Disclose reference to a sibling file inside the skill (`references/foo.md`, `GLOSSARY.md`), never to a path in another skill. The install adapters copy the folder verbatim, so a `../other-skill/FILE.md` pointer arrives broken. Where two skills need the same material, one invokes the other by name in prose (`Run the /grilling skill`) rather than reaching across folders.
+- **Conditionality governs references.** Place conditional branches (subagent orchestration, config editing, specialized templates) in `references/`, never always-read steps.
+- **Targeted edits protect user configuration.** Any script modifying consumer configuration must use targeted field edits with single-match assertions.
 - **Owner folders carry the invocation decision that frontmatter can't yet.** A skill you only ever fire by hand belongs in the catalog all the same; until per-platform invocation metadata lands, say so in the description's first clause rather than relying on a flag. The folders are `shared, developers, qa, product, ops, in-progress, deprecated`; `shared` is machine-checked (§3.1), and a `requires:` list declares preflight dependencies (§5).
 - **The description is the trigger contract.** Editing it is a behaviour change, not a docs change — re-run the skill's trigger eval under `evals/` afterwards.
 

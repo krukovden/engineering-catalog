@@ -22,8 +22,9 @@ memory. It defines no code.
 dependency mechanism, distribution and update for Claude Code and GitHub Copilot,
 and the project-memory capability end to end.
 
-**Out of scope.** Any work tracker. Any hosted service. Any database. The catalog
-writes plain files into a git repository and nothing else.
+**Out of scope.** Owning a work tracker. Any hosted service. Any database. The catalog
+writes plain files into a git repository and nothing else, with one deliberate
+exception: `ado-board` moves Azure Boards work item states (§14).
 
 **Not a Claude plugin, and not a Copilot plugin.** It is a vendor-neutral catalog
 whose unit is the Skill; Claude and Copilot are two of its delivery targets and
@@ -242,13 +243,16 @@ consumers read them directly:
 | `.claude-plugin/marketplace.json` | Claude, when the marketplace is added |
 | `.claude-plugin/plugin.json` | Claude, to install and to detect updates |
 | `plugin.json` (repo root) | the Copilot plugin marketplace format |
+| `.claude-workflows/<name>/SKILL.md` | Claude, each promoted workflow as a user-invoked skill (`disable-model-invocation: true`) |
+| `.copilot-plugin/workflows/<name>/SKILL.md` | Copilot, the same workflow skill without that flag |
 | each owner folder's `README.md` | humans |
 | the root `README.md` table | humans |
 
 Two manifests are needed because the two formats differ and neither reads the
-other: Claude discovers skills by convention from a `skills/` directory and its
-schema has no `skills` field; the Copilot CLI format requires the list to be
-explicit. One file cannot serve both.
+other: Claude lists each agent file and reads Claude-format hooks; the Copilot CLI
+format takes one agents directory and Copilot-format hooks. Both list the owner
+skill folders explicitly, plus their own workflow-skill folder when a workflow
+ships (§15.6). One file cannot serve both.
 
 The release version lives in one place — the package manifest — and the build
 writes it into everything else. Claude compares that field against the installed
@@ -648,10 +652,22 @@ costs everything.
 
 ## 14. What is deliberately not here
 
-- **A general work tracker.** Memory lives in the repository, and nothing in
-  this design requires a board for its core model. The one explicit exception is
-  a deliberate board-tracking unit (`ado-board`) that writes Azure Boards
-  **states** from repository facts; anything broader still needs a new decision.
+- **A work tracker.** Memory lives in the repository. Nothing in this design
+  requires a board, and nothing should acquire that requirement without a new
+  decision.
+
+  That decision has been taken once, deliberately: **`ado-board`** writes to Azure
+  Boards. It is a scope change, not a tracker. It owns no store: the board stays the
+  record, and the only thing written locally is a per-project state map
+  (`~/.engineering-catalog/ado-board/<org>/<project>.json`, committed only on explicit
+  opt-in), which holds no credential and no credential path. Its limits: it changes the
+  `State` field and adds an evidence comment, nothing else; it moves forward only through
+  `todo → doing → testing → verify → done`, and a completed PR never takes a type with
+  testing states past `testing` (done stays a person's move); it never moves a card carrying an `idp:` tag and never
+  touches Removed; when Azure DevOps requires a field it stops and names the field, never
+  inventing a value; `reconcile` is stateless and idempotent and reads completed pull
+  requests from the PR API, not from merge commits; and there are no per-commit git hooks.
+  Memory and every other unit still work with no board at all.
 - **A database, a service, a daemon, an index to rebuild.** Markdown under git is
   the store. Anything derived must be rebuildable from it and must never be the
   thing that is trusted.
@@ -668,7 +684,7 @@ Where §13 leaves a question open or silent, this is what was built, and why.
 |---|---|
 | Targets | `claude`, `copilot` only. No Codex adapter (§1: a third target is one adapter file later). If one is ever added, note that Codex CLI caps its `AGENTS.md` chain at 32 KiB and silently truncates past it (`coding-agent-platforms` reference) — keep this file's growth in view. |
 | Copilot layout | §7.1: local `.github/skills/<name>/`, global `~/.copilot/skills/<name>/`. Agents: local `.github/agents/<name>.agent.md`, global `~/.copilot/agents/<name>.agent.md`. Copilot reads the same Agent Skills `SKILL.md` format as Claude, so the tree is copied verbatim; `invocation: user` becomes `disable-model-invocation: true` on Claude only — on Copilot the flag would hide the skill from `/name` too, so it is omitted there. |
-| Workflow install | A workflow is installed on both targets as a **user-invoked skill** (`<skills>/<name>/SKILL.md`) rendered from the workflow file (§2.3: readable list, not an execution format). Workflows do not appear in the Claude plugin manifest (the plugin path is a convenience, not the contract). |
+| Workflow install | A workflow is installed on both targets as a **user-invoked skill** (`<skills>/<name>/SKILL.md`) rendered from the workflow file (§2.3: readable list, not an execution format). Both plugin manifests ship promoted workflows too, as generated skill folders: `.claude-workflows/<name>/SKILL.md` (with `disable-model-invocation: true`) and `.copilot-plugin/workflows/<name>/SKILL.md` (without it), each byte-equal to what its adapter installs (§15.6). |
 | Unit version (§7.2) | A 12-hex content fingerprint over the unit's files, computed by the build and published in `catalog.json`. |
 | Receipt location (§7.2) | `<base>/.engineering-catalog/receipt.json` where `<base>` is the project dir (local) or `~` (global). Records `bundles` too, so `update` can re-plan. |
 | Memory folder (§13.4) | `memory/` at the project root, overridable with `--dir`. |
@@ -683,7 +699,7 @@ Where §13 leaves a question open or silent, this is what was built, and why.
 | Agent `model:` | A string (the same hint everywhere) or a map keyed by target (`claude:` accepts `opus\|sonnet\|haiku\|inherit`, `copilot:` a Copilot CLI model id). `catalog.json` keeps it as written; adapters emit `model:` only where a value exists for their platform. |
 | Eval case format | The documented `claude plugin eval` format, so Claude runs the suite natively and the Copilot runner reads the same files. Cases live in a root `evals/`, not inside skill directories: the native command reads one eval directory, agents and workflows are single files with nowhere to put cases, scenarios belong to no single unit, and cases inside a skill used to ship to users. |
 | Eval models | Cheap models where the catalog's effect has room to show: trigger cases on `claude-haiku-4-5` (effort low) and `gpt-5-mini`, behaviour cases on `claude-sonnet-5` (effort medium) and `gpt-5.4`; one judge for both CLIs, `claude-opus-5` (effort high). Copilot's list is what this organization's Copilot Business policy allows — Anthropic, Google, xAI and gpt-5.5/5.6 models are refused by the server. Pinned in `evals/eval.config.json`. |
-| Hook manifests | Generated from one source per hook (§7.1), so a new hook needs no code change and cannot exist on one platform by accident. |
+| Hook manifests | Generated from one source per hook (§7.1), so a new hook needs no code change and cannot exist on one platform by accident. A source's `matcher` is written in Claude tool names and rendered as Copilot runtime names; `denies: true` selects each CLI's deny shape and wraps the command to fail open (§15.3). |
 | Version A vs B | Ours, not the native runner's. `claude plugin eval --ablation` compares plugin-on with plugin-off; `npm run eval -- compare` compares two checkouts of the catalog, which is the question this repository actually asks. Every invocation therefore pins `--ablation none` and the arms are two worktrees. |
 | The verdict rule | `decideVerdict(summary, config)`: first match wins — invalid share or a cut-short cell (zero case rows below `minCases`) is Invalid; a hard regression or a CI entirely below zero is Worse; entirely above zero is Better; a lower bound clearing `-δ` is Not worse; otherwise Not proven, with per-case drops ≥ 0.67 flagged below `minCases`. Guardrails (cost/duration ratio, rising false-trigger rate) report beside the verdict without changing it. |
 | The Copilot arm | `scripts/eval/copilot.js` installs the catalog into a fake `HOME` via `lib/install.js` directly (no CLI, no `--plugin-dir` — confirmed not to load plugin skills), once per arm and reused across every case/run of that arm. `gh auth token` is captured once, in the real environment, before any fake `HOME` exists. `graders.js` is the pure grading engine Claude gets for free natively; `judge.js` calls headless `claude -p` for `llm`/`baseline` graders on **both** targets — one judge, pinned in `eval.config.json`, never Copilot's own CLI. An agent fires through `Task` with `subagent_type: "<plugin>:<agent-name>"`, the same namespacing `Skill` uses. |
@@ -709,14 +725,35 @@ A unit belongs in `shared` when, and only when, bundles of two or more different
 name it — never a manual editorial call. This keeps ownership answerable from the bundles
 alone, with no separate "is this shared" judgment to keep in sync by hand as bundles change.
 
-### 15.3 Why hooks may inform but never enforce
+### 15.3 Why context hooks only inform, and deny hooks stay narrow
 
-Copilot loses **all** of a `SessionStart` message when two hooks answer the same event with
-`additionalContext` — both payloads run and log, neither reaches the model
-(`copilot-facts.md` §6.5). The second hook is usually not this catalog's own; it belongs to
-whatever repository the catalog installs into, which this catalog cannot know in advance.
-Hence the rule: a hook may inform, must never enforce, and nothing may depend on a session
-message actually being read.
+Context hooks (`SessionStart`, `UserPromptSubmit`, `PostToolUse`) inform. They are
+best-effort, and nothing may depend on their message arriving. A plugin has **one**
+context-emitting `SessionStart` hook; anything else that wants a session line joins it. A
+`PreToolUse` hook may deny, but only a narrow invariant that can be decided from the tool
+input and local git state, with no network and no session memory. A deny hook fails open on
+every internal error and when its runtime is absent. The **generated command** carries that
+guarantee, not just the script. A deny hook ships to Copilot only once its deny shape has a
+live capture in `copilot-facts.md` §6.
+
+Why context is best-effort: Copilot loses **all** of a `SessionStart` message when two hooks
+answer the same event with `additionalContext` — both payloads run and log, neither reaches
+the model (`copilot-facts.md` §6.5). The second hook is usually not this catalog's own; it
+belongs to whatever repository the catalog installs into, which this catalog cannot know in
+advance. That is a fact about context delivery. It says nothing about a `PreToolUse` deny,
+which travels on a different channel: the hook's own decision for one tool call.
+
+Why the deny must be narrow and fail open: on Copilot **any** non-zero `preToolUse` exit
+denies, and only a timeout fails open (`copilot-facts.md` §4.1). A crashing script, a missing
+`node` or a failed `cd` would block every edit. So `lib/hooks.js` wraps a `denies: true` hook's
+command to exit 0 whatever happens inside it, and the deny is the JSON decision on stdout,
+which both CLIs honour on exit 0 (Claude live-verified, `copilot-facts.md` §4.2). A deny that
+needed the network or the session's memory could fail in ways nobody sees; one decided from
+the tool input and local git state is cheap, deterministic and testable from a fixture.
+
+Why Copilot waits for a capture: §4.1 is doc-sourced, and every hook behaviour this
+repository has captured live differed from the reference in a way that failed silently
+(§6). The loader refuses a Copilot deny hook until `COPILOT_DENY_CAPTURED` is set.
 
 ### 15.4 Why eval isolation is decided per arm, not per case
 
@@ -726,3 +763,40 @@ level itself and honours a case's `allowed_tools`; `copilot` is launched with
 and workdir between a case and the machine. Containerizing only the weaker arm (Copilot,
 always) rather than deciding per case keeps the comparison apples-to-apples without paying
 container overhead on the arm that doesn't need it.
+
+### 15.6 Why workflows ship in the plugin manifests, in one folder per platform
+
+The plugin path is a convenience, not the contract (§7.1), but a person who installs the
+catalog as a Claude or Copilot plugin should still get the workflows; otherwise only
+`engcat install` reaches them. So `npm run build` renders each promoted workflow as a skill
+and commits it twice, appending each parent folder to its own manifest's `skills` list only
+when a workflow ships. Two folders, not one, because the renderings must differ: on Claude
+`disable-model-invocation: true` keeps a workflow user-invoked, on Copilot the same flag also
+hides it from `/name` (§15 "Copilot layout"). A shared folder would make the workflow
+model-invocable on Claude or unreachable on Copilot. Each rendering is asserted byte-equal to
+its adapter's install, so the plugin path and the CLI path cannot drift. The cost: two more
+generated trees, a stale-folder sweep in `build()`, and folder names that installed plugins
+now read, so renaming them is a manifest change for every user.
+
+### 15.5 When to write deterministic code and when to let the agent edit
+
+Reach for deterministic code — a script, a generator, a check — only when the operation is
+**(1) repeatable** across runs on a known shape, **(2) outcome-exact** — the same input must
+always produce the same bytes — and **(3) unattended** — no human approves or reviews the
+result. This catalog's own generated artifacts qualify: `npm run build` rewrites
+`catalog.json`, the plugin manifests and the managed blocks unattended and byte-exact, and
+`npm run check` proves them, so they belong in `lib/`.
+
+When any of the three fails — most of all when a human approves the change or reviews the
+resulting PR — prefer having the **agent make the edit directly**. The decisive question is
+*whose artifact is this, and who checks it*: the catalog's own state, edited unattended, is
+code territory; **someone else's arbitrary artifact** (a consumer's pipeline, an app's config)
+edited interactively and reviewed in a PR is agent territory.
+
+Why: a deterministic codemod must recognise a fixed input shape and gives up on everything it
+does not recognise, so it serves the narrow case and abandons the long tail. An agent
+generalises across shapes. And when a human already approves the diff and reviews the PR, that
+human *is* the correctness check the determinism would otherwise buy, so the codemod's
+brittleness becomes pure cost for no added safety. A skill's helper script that edits a file
+the user also owns falls under the same test: deterministic where the shape is ours and
+known (a managed block between markers), agent-made where it is not.

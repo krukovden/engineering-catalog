@@ -227,6 +227,9 @@ function Invoke-AdoRest {
     if ($detail -match "Azure DevOps Services \| Sign In" -or $status -eq 203 -or $status -eq 401) {
       throw "Azure DevOps rejected the PAT (expired, revoked, or missing a scope). Run the ado-credentials preflight and follow its steps. [$Method $uri]"
     }
+    if ($status -eq 403) {
+      throw "the token can sign in but is not allowed to $(if ($Method -eq 'Get') { 'read this' } else { 'change this' }): create a new PAT with Work Items (Read & write). (HTTP 403) [$Method $uri]"
+    }
     $message = "Azure DevOps request failed"
     if ($status) { $message += " (HTTP $status)" }
     $message += ": $Method $uri"
@@ -239,6 +242,13 @@ function Invoke-AdoRest {
   # $null, and a caller would carry on as if the PAT worked. Same message as the catch path.
   if ($result -is [string] -and $result -match "Azure DevOps Services \| Sign In") {
     throw "Azure DevOps rejected the PAT (expired, revoked, or missing a scope). Run the ado-credentials preflight and follow its steps. [$Method $uri]"
+  }
+  # Invoke-RestMethod also hands back raw text when the JSON holds a property name it cannot
+  # turn into a PowerShell property. Work item types do: a process's state transitions carry
+  # one keyed "" (the transition into the first state). Every caller reading .value would
+  # then see nothing, and the type check would reject every type. Rename that key and parse.
+  if ($result -is [string] -and $result.TrimStart().StartsWith("{")) {
+    $result = ($result -replace '(?<!\\)"":', '"(empty)":') | ConvertFrom-Json
   }
   return $result
 }

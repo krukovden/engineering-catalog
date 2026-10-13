@@ -42,14 +42,14 @@ The script prints `memory dir: <path>` and then one line per step,
 |---|---|---|---|---|
 | `folder` | creates `<memory>/units/` and `<memory>/.store.json` (`{ "store", "dir", "created" }` — `dir` is the repo-relative posix path such as `memory` for a committed store, the absolute folder for a local one) | created now | both already existed | — |
 | `index` | writes a skeleton `index.md`: contract comment, `reconciled-sha: none`, `store: <choice>`, empty sections, an empty `## Units` table, a placeholder rejection line | written now | file already existed — untouched | — |
-| `pointers` | writes the managed block into `CLAUDE.md`, `.github/copilot-instructions.md` and `AGENTS.md` (created if absent; existing content kept) | at least one file changed | all three already carried the block | — |
-| `hook` | installs `git rev-parse HEAD >> "$(git rev-parse --show-toplevel)/<dir>/.pending"` (committed store; the local store uses its absolute folder, forward slashes) into the repository's `post-commit` hook, between `# engineering-catalog:memory:start/end` markers; an existing hook keeps its own content | written now | already present | not a git repository |
+| `pointers` | writes the managed block into `CLAUDE.md`, `.github/copilot-instructions.md` and `AGENTS.md` (created if absent; existing content kept) | at least one file changed | all three already carried the current block | — |
+| `hook` | installs `git rev-parse HEAD >> "$(git rev-parse --show-toplevel)/<dir>/.pending"` (committed store; the local store uses its absolute folder, forward slashes) into the repository's `post-commit` hook, between `# engineering-catalog:memory:start v=1` / `# engineering-catalog:memory:end`; an existing hook keeps its own content | written now | already present | not a git repository |
 | `gitignore` | adds `<dir>/.pending` to `.gitignore` | added now | already listed | store is `local` |
 
-`error` on any line means that step failed and the script exits 1; read the detail,
-fix the cause, run the same command again. Re-running continues — every step that
-is already in place reports `kept`; nothing is recreated, and an existing
-`index.md` is never overwritten.
+`error` on any line means that step failed, the script exits 1 **at that step**, and
+the old managed stamp stays in place. Read the detail, fix the cause, run the same
+command again. Re-running continues — every step that is already in place reports
+`kept`; nothing is recreated, and an existing `index.md` is never overwritten.
 
 ## Step 3 — fill the index from the code
 
@@ -94,7 +94,7 @@ every unit file has a row, and every entry's fields are valid.
 Verify the managed block landed in all three files:
 
 ```
-<!-- engineering-catalog:memory:start -->
+<!-- engineering-catalog:memory:start v=1 -->
 ## Project memory
 Read `memory/index.md` first. Load `memory/units/<slug>.md` only when work touches that unit.
 Write an entry only when the change is hard to reverse, not obvious without context, and the result of a real trade-off — all three.

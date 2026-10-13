@@ -1,10 +1,12 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
 const SCRIPT = path.join(__dirname, '..', 'skills/developers/ado-branch/scripts/branch-name.js');
+const SKILL = path.join(__dirname, '..', 'skills/developers/ado-branch/SKILL.md');
 const { branchName, slug } = require(SCRIPT);
 const cli = (...args) => execFileSync('node', [SCRIPT, ...args]).toString().trim();
 
@@ -42,4 +44,14 @@ test('branchName rejects a missing or non-numeric id', () => {
 test('CLI: compute, and a missing id fails', () => {
   assert.equal(cli('--type', 'Bug', '--id', '103533', '--title', 'Export: empty file when >10 MB!'), 'bug/ADO-103533-export-empty-file-when-10-mb');
   assert.throws(() => execFileSync('node', [SCRIPT, '--type', 'Bug'], { stdio: 'pipe' }), /id/);
+});
+
+test('ado-branch documents explicit az readiness before Azure CLI calls', () => {
+  const text = fs.readFileSync(SKILL, 'utf8');
+  assert.match(text, /Run the `ado-credentials` skill first \(`-RequireAz` on Windows,\s+`--require-az` on macOS\/Linux[^)]*\) and read its outcome/);
+  assert.match(text, /That preflight also owns the Azure CLI\s+readiness for this skill/);
+  assert.doesNotMatch(text, /command -v az/);
+  assert.doesNotMatch(text, /az account show -o none/);
+  assert.doesNotMatch(text, /az extension show --name azure-devops -o none/);
+  assert.doesNotMatch(text, /az devops configure --list/);
 });

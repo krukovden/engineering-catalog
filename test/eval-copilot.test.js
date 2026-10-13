@@ -64,6 +64,19 @@ test('parseTrace on a killed run (no result event) still returns partial tool ca
   assert.equal(trace.toolCalls[1].success, null, 'the bash call never got its execution_complete event');
 });
 
+test('parseTrace timeline carries completion order: a call started inside a still-running task ends before it', () => {
+  const ev = (type, data) => JSON.stringify({ type, data });
+  const jsonl = [
+    ev('tool.execution_start', { toolCallId: 'a', toolName: 'task', arguments: { agent_type: 'memory-writer' } }),
+    ev('tool.execution_start', { toolCallId: 'b', toolName: 'bash', arguments: { command: 'git diff --stat' } }),
+    ev('tool.execution_complete', { toolCallId: 'b', success: true }),
+    ev('tool.execution_complete', { toolCallId: 'a', success: true }),
+  ].join('\n');
+  const { raw } = parseTrace(jsonl);
+  const timeline = raw.split('timeline:\n')[1].split('\n\n')[0].split('\n').map((l) => l.split('(')[0]);
+  assert.deepEqual(timeline, ['start task', 'start bash', 'end bash', 'end task']);
+});
+
 test('fromCopilotJson produces a RunRecord matching the shape records.js expects, for a clean run', () => {
   const trace = parseTrace(fs.readFileSync(RUN_FIXTURE, 'utf8'), { workdir: '/tmp/wd' });
   const caseDef = { name: 'trigger-ssh-staging', group: 'safety-ssh', tags: ['trigger:positive'] };
@@ -241,14 +254,22 @@ test('runCase never installs a catalog when no root is given (a case can grade w
   assert.equal(result.outcome, 'ok');
 });
 
-test('runCase returns outcome "interrupted" (not a throw) when exec reports a timeout', async () => {
+test('runCase classifies a wall-clock kill as a stall (invalid, not a fail), not a throw', async () => {
   const exec = async () => ({ code: null, stdout: '', stderr: 'boom: killed', timedOut: true });
   const caseDef = { name: 'x', group: 'g', tags: [], prompt: 'p', allowedTools: ['Skill'], timeoutSeconds: 1 };
   const result = await runCase({ cell: CELL, arm: 'candidate', caseDef, exec, token: 't', creditUsd: 0.01 });
-  assert.equal(result.outcome, 'interrupted');
+  assert.equal(result.outcome, 'stall');
   assert.deepEqual(result.records.length, 1);
   assert.match(result.records[0].error, /timed out/);
-  assert.equal(result.records[0].invalid.kind, 'crash');
+  assert.equal(result.records[0].invalid.kind, 'stall');
+});
+
+test('a stall stays a stall even when the killed run had already printed a result', async () => {
+  const exec = async () => ({ code: null, stdout: fs.readFileSync(RUN_FIXTURE, 'utf8'), stderr: '', timedOut: true });
+  const caseDef = { name: 'x', group: 'g', tags: [], prompt: 'p', allowedTools: ['Skill'], timeoutSeconds: 1 };
+  const result = await runCase({ cell: CELL, arm: 'candidate', caseDef, exec, token: 't', creditUsd: 0.01 });
+  assert.equal(result.outcome, 'stall');
+  assert.equal(result.records[0].invalid.kind, 'stall');
 });
 
 test('runCase returns outcome "failed" (not a throw) on a non-zero exit with no result event', async () => {
@@ -269,6 +290,21 @@ test('runCase never throws even when ghTokenFn throws (no injected token, gh una
   assert.equal(result.outcome, 'failed');
   assert.deepEqual(result.records, []);
   assert.match(result.error, /gh not authenticated/);
+});
+
+test('runCase: a failing judge process makes the run invalid, not a failed score', async () => {
+  const exec = async () => ({ code: 0, stdout: fs.readFileSync(RUN_FIXTURE, 'utf8'), stderr: '', timedOut: false });
+  const judgeExec = async () => ({ text: '', error: 'Error: rate limit exceeded' });
+  const caseDef = {
+    name: 'x', group: 'g', tags: [], prompt: 'p', allowedTools: ['Skill'], timeoutSeconds: 60,
+    graders: [{ name: 'no-secrets', type: 'llm', weight: 1, criteria: 'must not leak secrets' }],
+  };
+  const result = await runCase({
+    cell: CELL, arm: 'candidate', caseDef, exec, token: 't', creditUsd: 0.01,
+    judge: { target: 'claude', model: 'claude-opus-5' }, judgeExec,
+  });
+  assert.equal(result.records.length, 1);
+  assert.equal(result.records[0].invalid.kind, 'rate-limit');
 });
 
 test('runCase invokes an injected judge for an llm grader and folds its verdict into the score', async () => {

@@ -45,7 +45,9 @@ Anything other than `current` is still usable evidence. It is not usable as *cur
 the `draftHash` they approved.
 
 **"The draft changed after the approved preview"** — the draft moved between approval and
-publish. Preview again and ask again. Do not pass the new hash without re-asking; the point
+publish. This includes the destination: the hash covers the resolved organization and
+project, so changing the draft's context (or the configuration behind its alias) needs a
+new preview. Preview again and ask again. Do not pass the new hash without re-asking; the point
 of the check is that the human saw this wording.
 
 **"This draft was already published"** — the receipt beside the draft records the id and
@@ -62,6 +64,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "scripts/query-ado.ps1" -Act
 If it exists, write its id and url into the `.receipt.json` file with `"state": "created"`.
 If it does not, delete the receipt file and re-run the publish. Deleting a receipt without
 searching first is how a duplicate gets created.
+
+A request Azure DevOps rejected outright (HTTP 400/401/403/404/422) creates nothing, so the
+script deletes its receipt itself: fix the cause and re-run. A concurrent second `-Commit`
+for the same draft is refused the same way as a repeat.
 
 ## Common errors
 

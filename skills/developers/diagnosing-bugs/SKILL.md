@@ -119,6 +119,13 @@ If a correct seam exists:
 4. Watch it pass.
 5. Re-run the Phase 1 feedback loop against the original (un-minimised) scenario.
 
+### The test-oracle rule (failing oracle before the fix)
+
+Get the oracle failing before you apply the fix.
+- The red state can stay local or in the working tree when repository policy requires green history; the requirement is that you have observed the oracle fail on this bug before you change the code.
+- This prevents writing the oracle against already-passing code, which creates an illusion of testing.
+- If the repository and task allow it, a separate red commit is strong evidence — but it is optional, not required.
+
 ## Phase 6 — Cleanup + post-mortem
 
 Required before declaring done:
@@ -130,3 +137,9 @@ Required before declaring done:
 - [ ] The hypothesis that turned out correct is stated in the commit / PR message — so the next debugger learns
 
 **Then ask: what would have prevented this bug?** If the answer is architectural — no good test seam, tangled callers, hidden coupling — write it down as a concrete, named recommendation rather than a vague "we should refactor". Make the recommendation **after** the fix is in, not before: you have more information now than when you started.
+
+## When NOT to use
+
+- Simple syntax errors, typos, or missing imports with immediate, unambiguous compiler / linter diagnostic messages.
+- Purely cosmetic style or formatting adjustments where no behavior is broken.
+- Greenfield feature development where no regression or defect exists.

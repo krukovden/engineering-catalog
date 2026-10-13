@@ -183,3 +183,31 @@ test('extractReminderMessage tolerates the escaped backticks inside the template
   const msg = extractReminderMessage(src);
   assert.ok(msg && msg.startsWith('Source unit changed') && msg.endsWith('before committing.'));
 });
+
+test('a Copilot guard wired as a bare `command` (no fail-open wrapper) is caught', () => {
+  const root = stageClean();
+  const file = path.join(root, '.github/hooks/block-generated.json');
+  const manifest = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const hook = manifest.hooks.preToolUse[0];
+  delete hook.bash;
+  delete hook.powershell;
+  hook.command = 'node .github/hooks/block-generated.js';
+  fs.writeFileSync(file, JSON.stringify(manifest, null, 2));
+  const failures = runChecks({ root, runNpmCheck: noopNpmCheck });
+  assert.ok(failures.some((f) => f.check === 'guard-wiring' && /does not fail open/.test(f.detail)));
+});
+
+test('the Copilot guard denies a generated file with exit 2 and fails open when node is missing', () => {
+  const { spawnSync, execFileSync } = require('child_process');
+  const { bash } = JSON.parse(fs.readFileSync(path.join(REAL_ROOT, '.github/hooks/block-generated.json'), 'utf8')).hooks.preToolUse[0];
+  const input = JSON.stringify({ cwd: REAL_ROOT, toolName: 'edit', toolArgs: { path: path.join(REAL_ROOT, 'catalog.json') } });
+  const denied = spawnSync('bash', ['-c', bash], { cwd: REAL_ROOT, input, encoding: 'utf8' });
+  assert.equal(denied.status, 2);
+  assert.match(JSON.parse(denied.stdout).permissionDecisionReason, /catalog\.json is generated/);
+
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'nonode-'));
+  const noNode = spawnSync(execFileSync('sh', ['-c', 'command -v bash'], { encoding: 'utf8' }).trim(), ['-c', bash], {
+    cwd: REAL_ROOT, input, encoding: 'utf8', env: { ...process.env, PATH: bin },
+  });
+  assert.equal(noNode.status, 0, 'a missing node must not block every edit');
+});

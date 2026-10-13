@@ -112,6 +112,7 @@ function spawnExec(command, args, { cwd, env, timeoutMs } = {}) {
 function parseTrace(jsonlText, { workdir } = {}) {
   const calls = new Map();
   const order = [];
+  const timeline = [];
   const replyParts = [];
   let result = null;
   let turns = 0;
@@ -127,9 +128,13 @@ function parseTrace(jsonlText, { workdir } = {}) {
       const id = event.data.toolCallId;
       calls.set(id, { name: event.data.toolName, input: event.data.arguments, success: null });
       order.push(id);
+      timeline.push({ kind: 'start', id });
     } else if (event.type === 'tool.execution_complete') {
       const call = calls.get(event.data.toolCallId);
-      if (call) call.success = !!event.data.success;
+      if (call) {
+        call.success = !!event.data.success;
+        timeline.push({ kind: 'end', id: event.data.toolCallId });
+      }
     } else if (event.type === 'assistant.message') {
       const content = event.data && event.data.content;
       if (content) replyParts.push(content);
@@ -141,7 +146,11 @@ function parseTrace(jsonlText, { workdir } = {}) {
   }
   const toolCalls = order.map((id) => calls.get(id));
   const reply = replyParts.join('');
-  const raw = `${toolCalls.map((c) => `${c.name}(${JSON.stringify(c.input)}) -> ${c.success}`).join('\n')}\n\n${reply}`;
+  const fmt = (c) => `${c.name}(${JSON.stringify(c.input)}) -> ${c.success}`;
+  // The call list is in start order; the timeline interleaves start and end events so a grader
+  // can tell a call that began after another one finished from one that merely began later.
+  const events = timeline.map((e) => `${e.kind} ${fmt(calls.get(e.id))}`).join('\n');
+  const raw = `${toolCalls.map(fmt).join('\n')}\n\ntimeline:\n${events}\n\n${reply}`;
   return { reply, raw, toolCalls, turns, usage: result ? result.usage : undefined, result, workdir };
 }
 
@@ -208,8 +217,8 @@ async function runScaffold({ caseDef, cwd, env, exec }) {
 }
 
 /**
- * One case, one run, end to end. Never throws — a killed/crashed run returns `outcome: 'failed'`
- * or `'interrupted'` with the stderr tail, same philosophy as claude.js, so one bad Copilot cell
+ * One case, one run, end to end. Never throws — a crashed run returns `outcome: 'failed'`, one
+ * the wall-clock timer killed returns `'stall'`, each with the stderr tail, same philosophy as claude.js, so one bad Copilot cell
  * cannot take down a whole compare. `exec` is injected (default `spawnExec`) so tests never
  * launch the real `copilot` binary; `token`/`ghTokenFn`/`installCatalogFn` are equally injectable
  * so tests never shell out to `gh` or touch the real catalog root unexpectedly.
@@ -244,16 +253,28 @@ async function runCase(opts) {
     const trace = parseTrace(stdout, { workdir: resolvedWorkdir });
     const hasResult = !timedOut && !!trace.result && trace.result.exitCode === code;
     let graded = { score: NaN, passed: false, graders: [] };
+    let judgeError = null;
     if (hasResult) {
       const judgeFn = (grader, tr) => runJudge({ grader, trace: tr, judge, exec: judgeExec });
-      graded = await gradeCase(caseDef, trace, { judge: judgeFn });
+      try {
+        graded = await gradeCase(caseDef, trace, { judge: judgeFn });
+      } catch (e) {
+        if (!e || !e.judgeFailure) throw e;
+        judgeError = e.message;
+      }
     }
     const record = fromCopilotJson({ cell, arm, caseDef, trace, exitCode: code, graded, index, startedAt, creditUsd });
+    if (judgeError) {
+      record.error = judgeError;
+      record.invalid = classifyInvalid({ error: judgeError, partial: false, score: NaN });
+    }
+    // The wall-clock kill is the Copilot arm's only turn limit, so a run it ends is a stall:
+    // excluded like a rate-limited run, never scored as the model failing the case.
     if (timedOut) {
       record.error = `copilot timed out after ${timeout}ms: ${tail(stderr)}`;
-      record.invalid = classifyInvalid({ error: record.error, partial: false, score: record.score });
+      record.invalid = { kind: 'stall', reason: record.error };
     }
-    const outcome = timedOut ? 'interrupted' : !hasResult ? 'failed' : graded.score < 1 ? 'below-threshold' : 'ok';
+    const outcome = timedOut ? 'stall' : !hasResult ? 'failed' : graded.score < 1 ? 'below-threshold' : 'ok';
     const topError = hasResult ? null : (record.error || tail(stderr) || 'copilot run produced no result event');
     return { records: [record], raw: stdout, exitCode: code, outcome, error: topError };
   } catch (e) {

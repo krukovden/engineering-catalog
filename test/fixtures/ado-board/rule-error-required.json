@@ -1,0 +1,20 @@
+{
+  "$id": "1",
+  "customProperties": {
+    "RuleValidationErrors": [
+      {
+        "fieldReferenceName": "Microsoft.VSTS.Common.ResolvedReason",
+        "fieldStatusFlags": "required, hasValues, limitedToValues",
+        "errorMessage": "TF401320: Rule Error for field Resolved Reason. Error code: Required, HasValues, LimitedToValues, InvalidEmpty.",
+        "fieldStatusCode": 1048577,
+        "ruleValidationErrors": null
+      }
+    ]
+  },
+  "innerException": null,
+  "message": "TF401320: Rule Error for field Resolved Reason. Error code: Required, HasValues, LimitedToValues, InvalidEmpty.",
+  "typeName": "Microsoft.TeamFoundation.WorkItemTracking.Server.RuleValidationException, Microsoft.TeamFoundation.WorkItemTracking.Server",
+  "typeKey": "RuleValidationException",
+  "errorCode": 0,
+  "eventId": 3200
+}

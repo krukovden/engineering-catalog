@@ -1,0 +1,10 @@
+{
+  "count": 5,
+  "value": [
+    { "name": "Bug", "isDisabled": false },
+    { "name": "Product Backlog Item", "isDisabled": false },
+    { "name": "Test Case", "isDisabled": false },
+    { "name": "Code Review Request", "isDisabled": false },
+    { "name": "Impediment", "isDisabled": true }
+  ]
+}

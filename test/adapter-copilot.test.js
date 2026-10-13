@@ -53,3 +53,28 @@ test('skipReason and install', () => {
   assert.ok(fs.existsSync(path.join(base, '.copilot/skills/alpha/scripts/run.sh')));
   assert.equal(written.length, 3);
 });
+
+test('a session-start skill gets a Copilot instructions file that runs it, in both scopes', () => {
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ss-')), 'warmup');
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, 'SKILL.md'), '---\nname: warmup\nsession-start: true\ndescription: d\n---\nbody\n');
+  const unit = u.loadSkillFromDir(dir, 'shared');
+  assert.equal(unit.sessionStart, true);
+  const global = copilot.outputs(unit, 'global').find((o) => o.path === '.copilot/instructions/warmup.instructions.md');
+  const local = copilot.outputs(unit, 'local').find((o) => o.path === '.github/instructions/warmup.instructions.md');
+  assert.ok(global && local);
+  const text = global.content.toString();
+  assert.match(text, /run the `warmup` skill/);
+  assert.match(text, /begin your reply with that line, word for word/);
+  // Copilot shows text written beside a tool call as its own message (live capture: "Freshness is silent.").
+  assert.match(text, /send every tool call with no text beside it/);
+  assert.equal(copilot.outputs(alpha(), 'global').filter((o) => o.path.includes('/instructions/')).length, 0, 'only session-start skills get one');
+  assert.equal(require('../lib/adapters/claude').outputs(unit, 'global').filter((o) => o.path.includes('instructions')).length, 0, 'Claude has its own SessionStart hook');
+});
+
+test('session-start accepts only true or false', () => {
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ss-')), 'bad');
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, 'SKILL.md'), '---\nname: bad\nsession-start: always\ndescription: d\n---\nbody\n');
+  assert.throws(() => u.loadSkillFromDir(dir, 'shared'), /session-start to "always"/);
+});

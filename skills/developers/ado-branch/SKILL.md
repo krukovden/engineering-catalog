@@ -12,13 +12,19 @@ A branch is named after its Azure DevOps work item: `feature/ADO-<id>-<kebab-tit
 `scripts/branch-name.js`, never written by hand, so every branch in the team carries its
 work item id in the same place.
 
+When `project-workspace` is installed, run its `register` command for the current repository; do nothing else with it here.
+
 ## Start a task
 
 The user names a work item ("start task 103533", "branch for bug 103520").
 
-1. **Preflight.** Run the `ado-credentials` skill first and read its outcome. Continue
+1. **Preflight.** Run the `ado-credentials` skill first (`-RequireAz` on Windows,
+   `--require-az` on macOS/Linux, because this skill runs `az`) and read its outcome. Continue
    only on `ok`. On `absent` or `expired` it has already told the user what to do — stop
-   here; do not try the Azure DevOps call anyway.
+   here; do not try the Azure DevOps call anyway. That preflight also owns the Azure CLI
+   readiness for this skill: if it reported missing `az`, no `az` login, a missing
+   `azure-devops` extension, or missing default organization/project, stop and point the
+   user back to its recovery steps instead of re-checking them here.
 
 2. **Read the work item.**
 
@@ -27,7 +33,7 @@ The user names a work item ("start task 103533", "branch for bug 103520").
    ```
 
    Take `fields."System.WorkItemType"` and `fields."System.Title"`. Organization and
-   project come from `az devops configure --defaults`; the preflight guaranteed them.
+   project come from the defaults the preflight already proved.
 
 3. **Compute the branch name.** Never hand-write it.
 
@@ -58,6 +64,18 @@ The user names a work item ("start task 103533", "branch for bug 103520").
 
 5. **Report in one line:** the branch and the work item title, for example
    `On bug/ADO-103533-export-empty-file-when-10-mb — "Export: empty file when >10 MB"`.
+
+## No work item id
+
+The user describes the task ("I need to add CSV export") but names no id. Do not stop and
+do not guess one.
+
+- `ado-backlog-placement` installed → offer it: "There is no work item for this. Find the
+  best place on the board for it? (yes / no)". On yes, run that skill; when it hands back
+  an id, continue at step 1 with it. On no, make no branch and say so.
+- Not installed → ask for the work item id.
+
+`ado-backlog-placement` is optional, never a requirement of this skill.
 
 ## Never
 

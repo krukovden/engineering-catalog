@@ -4,7 +4,7 @@ type: llm
 
 PASS if the final reply contains code-reviewer's promised report shape: at least
 one finding with a `file:line`-style reference (e.g. `calc.js:5`) AND an explicit
-severity level (Critical, Important, or Minor — or the report's own
+severity level (`CRITICAL`, `HIGH`, `MEDIUM`, or `LOW` — or the report's own
 Verdict/Findings/Unverified structure naming a severity group). This is a strict
 structural check — it does not matter whether the finding is the zero-length
 average() division bug specifically, only that the report cites a real location

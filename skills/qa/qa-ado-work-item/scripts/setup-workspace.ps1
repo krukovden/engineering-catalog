@@ -10,14 +10,20 @@
 # way twice. No secret is touched here: git clones through the askpass helper the
 # credentials setup installed.
 #
-# Exit codes: 0 = ok, 1 = error.
+# The assistant runs it with -NoPrompt right after `projects.ps1 -Add`: the repositories
+# then come from the project's code links, the workspace folder is the default, the team's
+# area path becomes the default area, and nothing is ever asked on the console (an agent's
+# shell cannot answer). A repository that fails to clone is reported, not fatal.
+#
+# Exit codes: 0 = ok, 2 = workspace saved but a repository did not clone, 1 = error.
 
 param(
   [string]$ContextName,
   [string]$Workspace,
   [string[]]$Repositories,
   [switch]$SkipClone,
-  [switch]$Force
+  [switch]$Force,
+  [switch]$NoPrompt
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,6 +38,7 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
 # The context must already exist on the credentials side: that is where the organization
 # and project live, and the credential was proven there. This script adds what QA needs.
 $credentialsConfig = Get-CredentialsConfig
+if (-not $ContextName -and $NoPrompt) { $ContextName = Get-Prop $credentialsConfig "activeContext" }
 if (-not $ContextName) {
   $known = @(Get-Prop $credentialsConfig "contexts" @()) | ForEach-Object { $_.name }
   $active = Get-Prop $credentialsConfig "activeContext"
@@ -43,6 +50,7 @@ $ContextName = $credentials.name
 $Organization = $credentials.organization
 $Project = $credentials.project
 Write-Host "Context '$ContextName': $Organization / $Project"
+Write-Host "Notice: project-workspace replaces setup-workspace.ps1 and will take over repository setup next release."
 
 # Existing config is merged, never replaced. Overwriting it used to delete every other
 # context on the machine, which made the multi-context workflow impossible to reach.
@@ -50,14 +58,22 @@ $config = $null
 if (Test-Path -LiteralPath (Get-ConfigPath)) { $config = Get-AssistantConfig }
 $existingContexts = @()
 if ($config) { $existingContexts = @(Get-Prop $config "contexts" @()) }
-if (@($existingContexts | Where-Object { $_.name -eq $ContextName }).Count -gt 0 -and -not $Force) {
+$previous = @($existingContexts | Where-Object { $_.name -eq $ContextName })[0]
+# -NoPrompt completes an existing workspace instead of replacing it: its repositories,
+# systems, allow list and defaults stay; new code links are added and the project's area
+# becomes the default. Replacing would drop repositories cloned by an older setup.
+if ($previous -and -not $Force -and -not $NoPrompt) {
   throw "Context '$ContextName' already has a workspace. Re-run with -Force to replace just that context."
 }
+if ($previous -and $NoPrompt -and -not $Workspace) { $Workspace = Get-Prop $previous "workspaceRoot" }
 
 if (-not $Workspace) {
   $default = Join-Path (Join-Path $env:USERPROFILE "QA-Workspaces") $ContextName
-  $Workspace = (Read-Host "Workspace folder [$default]").Trim()
-  if (-not $Workspace) { $Workspace = $default }
+  if ($NoPrompt) { $Workspace = $default }
+  else {
+    $Workspace = (Read-Host "Workspace folder [$default]").Trim()
+    if (-not $Workspace) { $Workspace = $default }
+  }
 }
 New-Item -ItemType Directory -Path $Workspace -Force | Out-Null
 # Resolve to an absolute path: a relative -Workspace (". " for "clone beside this folder")
@@ -65,40 +81,51 @@ New-Item -ItemType Directory -Path $Workspace -Force | Out-Null
 # script happened to run from.
 $Workspace = (Resolve-Path -LiteralPath $Workspace).Path
 
-Write-Host "Listing repositories in $Project..."
-$repoResponse = Invoke-AdoRest -Organization $Organization -Project $Project -Path "_apis/git/repositories"
-$available = @($repoResponse.value | Sort-Object name)
-if ($available.Count -eq 0) { throw "The project reports no Git repositories." }
-
-if ($Repositories) {
+# The project's own code links (projects.ps1 -Add) already name and prove the repositories.
+$linked = @(Get-Prop $credentials "repositories" @())
+if (-not $Repositories -and $linked.Count -gt 0) {
+  $selected = @($linked | ForEach-Object { [pscustomobject]@{ name = $_.name; remoteUrl = $_.remoteUrl } })
+}
+elseif (-not $Repositories -and $NoPrompt) {
   $selected = @()
-  foreach ($name in $Repositories) {
-    $match = @($available | Where-Object { $_.name -eq $name })[0]
-    if (-not $match) { throw "Repository '$name' is not in project '$Project'." }
-    $selected += $match
-  }
 }
 else {
-  Write-Host "Available repositories:"
-  for ($i = 0; $i -lt $available.Count; $i++) { Write-Host ("  [{0}] {1}" -f ($i + 1), $available[$i].name) }
-  $selection = (Read-Host "Repository numbers separated by commas, or * for all").Trim()
-  if ($selection -eq "*") { $selected = $available }
-  else {
+  Write-Host "Listing repositories in $Project..."
+  $repoResponse = Invoke-AdoRest -Organization $Organization -Project $Project -Path "_apis/git/repositories"
+  $available = @($repoResponse.value | Sort-Object name)
+  if ($available.Count -eq 0) { throw "The project reports no Git repositories." }
+
+  if ($Repositories) {
     $selected = @()
-    foreach ($part in ($selection -split ',')) {
-      $token = $part.Trim()
-      if (-not $token) { continue }
-      $index = 0
-      if (-not [int]::TryParse($token, [ref]$index)) { throw "'$token' is not a repository number." }
-      if ($index -lt 1 -or $index -gt $available.Count) { throw "Repository number $index is out of range." }
-      $selected += $available[$index - 1]
+    foreach ($name in $Repositories) {
+      $match = @($available | Where-Object { $_.name -eq $name })[0]
+      if (-not $match) { throw "Repository '$name' is not in project '$Project'." }
+      $selected += $match
     }
   }
+  else {
+    Write-Host "Available repositories:"
+    for ($i = 0; $i -lt $available.Count; $i++) { Write-Host ("  [{0}] {1}" -f ($i + 1), $available[$i].name) }
+    $selection = (Read-Host "Repository numbers separated by commas, or * for all").Trim()
+    if ($selection -eq "*") { $selected = $available }
+    else {
+      $selected = @()
+      foreach ($part in ($selection -split ',')) {
+        $token = $part.Trim()
+        if (-not $token) { continue }
+        $index = 0
+        if (-not [int]::TryParse($token, [ref]$index)) { throw "'$token' is not a repository number." }
+        if ($index -lt 1 -or $index -gt $available.Count) { throw "Repository number $index is out of range." }
+        $selected += $available[$index - 1]
+      }
+    }
+  }
+  if ($selected.Count -eq 0) { throw "No repository selected." }
 }
-if ($selected.Count -eq 0) { throw "No repository selected." }
 
 $askpass = Write-GitAskpass
 $repoConfigs = @()
+$cloneFailures = @()
 foreach ($repo in $selected) {
   $path = Join-Path $Workspace $repo.name
   if (-not $SkipClone -and -not (Test-Path -LiteralPath (Join-Path $path ".git"))) {
@@ -107,7 +134,7 @@ foreach ($repo in $selected) {
     $env:GIT_TERMINAL_PROMPT = "0"
     try {
       & git clone -- $repo.remoteUrl $path
-      if ($LASTEXITCODE -ne 0) { throw "Clone failed for $($repo.name)." }
+      if ($LASTEXITCODE -ne 0) { $cloneFailures += $repo.name }
     }
     finally {
       Remove-Item Env:GIT_ASKPASS -ErrorAction SilentlyContinue
@@ -117,6 +144,12 @@ foreach ($repo in $selected) {
   $repoConfigs += [ordered]@{ name = $repo.name; remoteUrl = $repo.remoteUrl; path = $path }
 }
 
+if ($previous -and $NoPrompt) {
+  foreach ($r in @(Get-Prop $previous "repositories" @())) {
+    if (@($repoConfigs | Where-Object { $_.remoteUrl -eq $r.remoteUrl }).Count -eq 0) { $repoConfigs += $r }
+  }
+}
+
 # No organization or project here: those belong to the credentials config and are joined
 # in by name at run time, so a renamed project is fixed in one place.
 $newContext = [ordered]@{
@@ -124,7 +157,7 @@ $newContext = [ordered]@{
   workspaceRoot = $Workspace
   repositories  = $repoConfigs
   systems       = @()
-  defaults      = [ordered]@{ workItemType = "Bug"; parentId = $null; areaPath = $null; iterationPath = $null }
+  defaults      = [ordered]@{ workItemType = "Bug"; parentId = $null; areaPath = (Get-Prop $credentials "areaPath"); iterationPath = $null }
   # The publisher refuses any field outside this list. Widen it only after confirming the
   # reference name with `query-ado.ps1 -Action Fields -Type <type>` — a field the
   # project's process does not carry is rejected by Azure DevOps at create time.
@@ -134,6 +167,21 @@ $newContext = [ordered]@{
     "Microsoft.VSTS.TCM.SystemInfo", "Microsoft.VSTS.Common.AcceptanceCriteria",
     "Microsoft.VSTS.Common.Priority", "Microsoft.VSTS.Common.Severity"
   )
+}
+
+if ($previous -and $NoPrompt) {
+  $newContext.systems = @(Get-Prop $previous "systems" @())
+  $previousFields = @(Get-Prop $previous "allowedFields" @())
+  if ($previousFields.Count -gt 0) { $newContext.allowedFields = $previousFields }
+  $previousDefaults = Get-Prop $previous "defaults"
+  if ($previousDefaults) {
+    $newContext.defaults = [ordered]@{
+      workItemType  = (Get-Prop $previousDefaults "workItemType" "Bug")
+      parentId      = (Get-Prop $previousDefaults "parentId")
+      areaPath      = $(if (Get-Prop $credentials "areaPath") { Get-Prop $credentials "areaPath" } else { Get-Prop $previousDefaults "areaPath" })
+      iterationPath = (Get-Prop $previousDefaults "iterationPath")
+    }
+  }
 }
 
 $kept = @($existingContexts | Where-Object { $_.name -ne $ContextName })
@@ -152,3 +200,7 @@ Write-Host "  Drafts:      $(Get-DraftRoot)"
 Write-Host "  Contexts:    $((@($kept + $newContext) | ForEach-Object { $_.name }) -join ', ')"
 Write-Host ""
 Write-Host "Add environments, simulators, and test rigs to the context's systems array when needed."
+if ($cloneFailures.Count -gt 0) {
+  Write-Host "Not cloned (check access, then run sync or this setup again): $($cloneFailures -join ', ')"
+  exit 2
+}
