@@ -1593,6 +1593,80 @@ test('reconcile keeps the prior completed-PR watermark when the PR list is trunc
   assert.equal(saved.reconcile.processedPullRequests.length, 2);
 });
 
+test('reconcile retains the first-run lower bound when the completed-PR list is truncated', async () => {
+  const { repo } = createRepo();
+  git(repo, 'fetch', 'origin');
+  const initialState = {
+    version: 1,
+    organization: 'https://dev.azure.com/example',
+    project: 'Catalog',
+    stateMap: createStateMap(),
+  };
+  const stateFile = createStateFile(repo, initialState);
+  class TruncatedTransport extends FakeTransport {
+    async listCompletedPullRequests(_context, options = {}) {
+      const rows = await super.listCompletedPullRequests(_context, options);
+      rows.truncated = true;
+      return rows;
+    }
+  }
+
+  const RealDate = global.Date;
+  const FixedDate = class extends RealDate {
+    constructor(...args) {
+      if (args.length === 0) {
+        super('2026-10-13T12:00:00.000Z');
+        return;
+      }
+      super(...args);
+    }
+    static now() {
+      return new RealDate('2026-10-13T12:00:00.000Z').getTime();
+    }
+  };
+  global.Date = FixedDate;
+  try {
+    const transport = new TruncatedTransport({
+      items: {
+        303: {
+          id: 303,
+          rev: 5,
+          fields: {
+            'System.WorkItemType': 'Bug',
+            'System.State': 'Active',
+            'System.Tags': '',
+            'System.Title': 'Truncated first-run item',
+          },
+        },
+      },
+      prs: [{
+        pullRequestId: 55,
+        sourceRefName: 'refs/heads/bug/ADO-303-first-run-truncated',
+        targetRefName: 'refs/heads/main',
+        creationDate: '2026-10-12T09:00:00.000Z',
+        closedDate: '2026-10-12T13:00:00.000Z',
+        workItemRefs: [{ id: 303 }],
+      }],
+    });
+
+    await reconcileBoard({
+      transport,
+      context: {},
+      stateMap: initialState.stateMap,
+      cwd: repo,
+      staleDays: 30,
+      throttleHours: 0,
+      stateFile,
+      projectState: initialState,
+    });
+    const saved = loadProjectState(stateFile);
+    assert.equal(saved.reconcile.queryMinTime, '2026-09-29T12:00:00.000Z');
+    assert.equal(transport.prQueries[0].minTime, '2026-09-29T12:00:00.000Z');
+  } finally {
+    global.Date = RealDate;
+  }
+});
+
 test('reconcile does not mark a PR processed when fetching its work-item links fails', async () => {
   const { repo } = createRepo();
   git(repo, 'fetch', 'origin');
@@ -1646,6 +1720,75 @@ test('reconcile does not mark a PR processed when fetching its work-item links f
 
   const saved = loadProjectState(stateFile);
   assert.equal(saved.reconcile.processedPullRequests.length, 0);
+  assert.equal(saved.reconcile.retryablePullRequests[0].pullRequestId, '55');
+});
+
+test('reconcile exposes the PR id and sanitized cause when the work-item refs fetch fails over HTTP', async () => {
+  const { repo } = createRepo();
+  git(repo, 'remote', 'set-url', 'origin', 'https://dev.azure.com/example/Catalog/_git/engineering-catalog');
+  const initialState = {
+    version: 1,
+    organization: 'https://dev.azure.com/example',
+    project: 'Catalog',
+    stateMap: createStateMap(),
+  };
+  const stateFile = createStateFile(repo, initialState);
+  const { HttpAzureDevOpsTransport } = require('../skills/shared/ado-board/scripts/lib');
+
+  const transport = new HttpAzureDevOpsTransport({
+    context: { organization: 'https://dev.azure.com/example', project: 'Catalog' },
+    authHeader: 'Basic test',
+    fetchImpl: async (url) => {
+      const text = String(url);
+      if (text.includes('/_apis/git/repositories/engineering-catalog/pullrequests')) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({
+            value: [{
+              pullRequestId: 55,
+              sourceRefName: 'refs/heads/bug/ADO-303-http-failure',
+              targetRefName: 'refs/heads/main',
+              closedDate: '2026-10-12T13:00:00.000Z',
+              workItemRefs: [],
+            }],
+          }),
+        };
+      }
+      if (text.includes('/_apis/git/repositories/engineering-catalog/pullRequests/55/workitems')) {
+        return {
+          ok: false,
+          status: 503,
+          text: async () => JSON.stringify({ message: 'The service is temporarily unavailable.' }),
+        };
+      }
+      if (text.includes('/_apis/wit/wiql')) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ workItems: [] }),
+        };
+      }
+      throw new Error(`unexpected url ${text}`);
+    },
+  });
+
+  const result = await reconcileBoard({
+    transport,
+    context: { organization: 'https://dev.azure.com/example', project: 'Catalog' },
+    stateMap: initialState.stateMap,
+    cwd: repo,
+    staleDays: 30,
+    throttleHours: 0,
+    stateFile,
+    projectState: initialState,
+  });
+
+  assert.equal(result.skipped[0].reason, 'work-item-links-error');
+  assert.equal(result.skipped[0].id, '55');
+  assert.match(result.skipped[0].message, /503|temporarily unavailable/i);
+  assert.equal(result.report.warnings.find((warning) => warning.code === 'pr-work-item-links-error').pullRequestId, '55');
+  const saved = loadProjectState(stateFile);
   assert.equal(saved.reconcile.retryablePullRequests[0].pullRequestId, '55');
 });
 

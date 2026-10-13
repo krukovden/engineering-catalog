@@ -70,3 +70,8 @@ repository `origin` and refuses to run when that disagrees with the discovered s
 the configured Azure context, so a hook never writes to the wrong org by accident. The
 comment it writes names the branch or pull request that justified the move. `reconcile` is
 idempotent: a second run over the same board and git state makes no changes.
+
+## Current limits
+
+- The completed-PR scan is not atomic. When the list is truncated or a pull request's work-item links could not be read, `reconcile` keeps the last safe lower bound and advances only after a contiguous successful scan. This narrows the window; it is not a single provider snapshot.
+- A transient 5xx/429 from the work-item links endpoint is not counted as reconciled: the pull request stays retryable and `reconcile` reports its id with the sanitized cause.
