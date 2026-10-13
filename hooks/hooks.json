@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/skills/shared/catalog-freshness/scripts/check-freshness.sh\" --quiet"
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/catalog-freshness-hook.sh\" --quiet"
           }
         ]
       }

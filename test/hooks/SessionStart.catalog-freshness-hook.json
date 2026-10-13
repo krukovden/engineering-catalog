@@ -1,5 +1,5 @@
 {
-  "id": "SessionStart.check-freshness",
+  "id": "SessionStart.catalog-freshness-hook",
   "scenarios": [
     {
       "name": "no receipt — silent and harmless",
